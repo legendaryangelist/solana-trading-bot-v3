@@ -140,7 +140,7 @@ To collect more information on an issue, please change `LOG_LEVEL` to `debug`.
 - If you see following error in your log file:  
   `Error: 410 Gone:  {"jsonrpc":"2.0","error":{"code": 410, "message":"The RPC call or parameters have been disabled."}, "id": "986f3599-b2b7-47c4-b951-074c19842bad" }`  
   it means your RPC node doesn't support methods needed to execute script.
-  - FIX: Change your RPC node. You can use Helius or Quicknode.
+  - FIX: Change your RPC node. You can use Helius or Quicknode. I recommend Helius.
 
 ### No token account
 
