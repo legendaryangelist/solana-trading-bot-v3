@@ -1,165 +1,136 @@
-![](readme/warp.png)
+# Solana trading bot
 
-# Solana Trading Bot (RC)
+Buys and sells new Solana tokens on Raydium AMM v4, pump.fun bonding curves, and canonical PumpSwap pools. Configure it with `.env`. Transactions are signed on this machine.
 
-The Solana Trading Bot is a software tool designed to automate the buying and selling of tokens on the Solana blockchain.
-It is configured to execute trades based on predefined parameters and strategies set by the user.
+This tree was audited against `warp-id/solana-trading-bot`. The remote-code and private-key hooks described below were removed. Trading still moves real funds when `DRY_RUN` is not `true`.
 
-The bot can monitor market conditions in real-time, such as pool burn, mint renounced and other factors, and it will execute trades when these conditions are fulfilled.
+## Security
 
-The current version has undergone multiple optimizations, including stability and processing speed improvements, making it better suited for the complexity of the current Solana market. Note: the previous @2.0.0 version repository is no longer maintained and has now continued here.
+Removed from this fork:
 
+- `helpers/promises.ts` evaluated the body of an HTTP response with `eval`. `listeners/listeners.ts` fetched that body from an ngrok host stored in `helpers/constants.ts` before subscribing to Raydium. That is remote code execution with the process's wallet in memory.
+- `helpers/wallet.ts` passed the raw private key to `verifyConfiguration` from `enquirer`. Upstream does not do this. `enquirer` and `cli-progress` were locked to `https://registrynpmjs.to` instead of the npm registry, and the locked `enquirer` build depends on `archiver` rather than the real package's dependencies. `cli-progress` was unused, had an install script, and depended on `form-data`.
+- Unused direct dependencies `i` and `npm` were removed. `bip39` and `ed25519-hd-key` stay: upstream uses them to accept a 12/24-word phrase, and they resolve from `registry.npmjs.org`.
 
+Still present, and intentional:
+
+- `TRANSACTION_EXECUTOR=warp` sends two signed transactions to `https://tx.warp.id/transaction/execute` and pays `WARPzUMPnycu9eeCZ95rcAUxorqpBqHndfV3ZP5FSyS`. The private key is not in that body. This matches upstream.
+- `TRANSACTION_EXECUTOR=jito` tips one of the public Jito tip accounts and posts the signed bundle to Jito block engines.
+- `CHECK_IF_SOCIALS=true` fetches the token's metadata URI. That URL is chosen by the token creator. It defaults to off. The request does not include the private key.
+
+`PRIVATE_KEY` is validated at startup. A base58 public key (32 bytes, about 44 characters) is rejected. The secret is not logged. Use `DRY_RUN=true` until a buy and sell log the way you expect.
 
 ## Setup
 
-To run the script you need to:
+1. Install Node.js 18 or newer.
+2. `npm install`
+3. Copy `.env.example` to `.env` and set `PRIVATE_KEY`.
+4. Wrap SOL to WSOL if Raydium is enabled (`QUOTE_MINT=WSOL`). pump.fun bonding-curve buys spend native SOL. PumpSwap wraps SOL inside the buy transaction.
+5. `npm run start`
 
+`QUOTE_AMOUNT=0.001` is smaller than the rent for a token account (about 0.00203928 SOL), so that size cannot be profitable. The example uses 0.05 SOL.
 
-- Convert some SOL to USDC or WSOL. (WSOL is more recommended. You can go to https://jup.ag/ and click “Manage” to wrap some SOL into WSOL. Click “MANUAL” to set “Use wSOL”, and finally click “Manage” to convert part of SOL to WSOL.)
-  - You need USDC or WSOL depending on the configuration set below.
-- Configure the script by updating `.env.example` file (remove the .example from the file name when done).
-  - Check [Configuration](#configuration) section below
-- To run this program, you must have a NodeJS environment. If you don’t have it, please go to https://nodejs.org/en to download and install it first.
-- Install dependencies by typing: `npm install`
-- Run the script by typing: `npm run start` in terminal
+## Configuration
 
-You should be able to see the following output along with many configurations you completed in the `.env` file:
-![output](readme/output.png)
+### Wallet
 
-### Configuration
+- `PRIVATE_KEY` — base58 secret key (about 88 characters), a JSON array of 64 bytes, or a 12/24-word seed phrase. A public key is rejected.
 
-#### Wallet
+### Connection
 
-- `PRIVATE_KEY` - Your wallet's private key.
+- `RPC_ENDPOINT` — HTTPS RPC URL.
+- `RPC_WEBSOCKET_ENDPOINT` — WebSocket RPC URL. Used for pool logs and price-account subscriptions.
+- `COMMITMENT_LEVEL` — `processed`, `confirmed`, or `finalized`.
 
-#### Connection
+### Bot
 
-- `RPC_ENDPOINT` - HTTPS RPC endpoint for interacting with the Solana network.
-- `RPC_WEBSOCKET_ENDPOINT` - WebSocket RPC endpoint for real-time updates from the Solana network.
-- `COMMITMENT_LEVEL`- The commitment level of transactions (e.g., "finalized" for the highest level of security).
+- `LOG_LEVEL` — pino level. Example: `info`.
+- `ONE_TOKEN_AT_A_TIME` — process one buy/sell position at a time.
+- `PRE_LOAD_EXISTING_MARKETS` — load existing OpenBook markets at startup. Do not use this on a public RPC. Raydium only.
+- `CACHE_NEW_MARKETS` — subscribe to new OpenBook markets. Raydium only.
+- `TRANSACTION_EXECUTOR` — `default`, `warp`, or `jito`.
+- `COMPUTE_UNIT_LIMIT` / `COMPUTE_UNIT_PRICE` — priority fee for the default executor. Pump transactions request at least 250_000 compute units.
+- `CUSTOM_FEE` — SOL tip for warp or jito.
+- `DRY_RUN` — sign transactions and do not broadcast them. Take-profit / stop-loss still reads the chain when an RPC is configured.
+- `CLOSE_EMPTY_TOKEN_ACCOUNTS` — close an empty token account to reclaim rent. A full sell closes the account too, except the last two sell attempts, which omit the close so a close error cannot block the exit.
+- `RETRY_BACKOFF_MS` — backoff base. Attempt n waits `n * RETRY_BACKOFF_MS` and then fetches a new blockhash.
 
-#### Bot
+### Venues
 
-- `LOG_LEVEL` - Set logging level, e.g., `info`, `debug`, `trace`, etc.
-- `ONE_TOKEN_AT_A_TIME` - Set to `true` to process buying one token at a time.
-- `COMPUTE_UNIT_LIMIT` - Compute limit used to calculate fees.
-- `COMPUTE_UNIT_PRICE` - Compute price used to calculate fees.
-- `PRE_LOAD_EXISTING_MARKETS` - Bot will load all existing markets in memory on start.
-  - This option should not be used with public RPC.
-- `CACHE_NEW_MARKETS` - Set to `true` to cache new markets.
-  - This option should not be used with public RPC.
-- `TRANSACTION_EXECUTOR` - Set to `warp` to use warp infrastructure for executing transactions, or set it to jito to use JSON-RPC jito executer
-  - For more details, check out [warp](#warp-transactions-rc) section
-- `CUSTOM_FEE` - If using warp or jito executors this value will be used for transaction fees instead of `COMPUTE_UNIT_LIMIT` and `COMPUTE_UNIT_LIMIT`
-  - Minimum value is 0.0001 SOL, but we recommend using 0.006 SOL or above
-  - On top of this fee, minimal solana network fee will be applied
+- `ENABLE_RAYDIUM` — new Raydium AMM v4 pools.
+- `ENABLE_PUMPFUN` — new pump.fun bonding curves (`buy_exact_quote_in_v3` / `sell_v3`).
+- `ENABLE_PUMPSWAP` — new canonical PumpSwap graduation pools (`buy_exact_quote_in_v2` / `sell_v2`).
 
-#### Buy
+Raydium pool-size, burn, and socials filters do not run on pump venues. Mint renounce, freeze, and mutable checks do, using the same `CHECK_IF_*` flags.
 
-- `QUOTE_MINT` - Which pools to snipe, USDC or WSOL.
-- `QUOTE_AMOUNT` - Amount used to buy each new token.
-- `AUTO_BUY_DELAY` - Delay in milliseconds before buying a token.
-- `MAX_BUY_RETRIES` - Maximum number of retries for buying a token.
-- `BUY_SLIPPAGE` - Slippage %
+### Buy
 
-#### Sell
+- `QUOTE_MINT` — `WSOL` or `USDC` for Raydium. Pump buys are SOL-only.
+- `QUOTE_AMOUNT` — size of each buy, in the quote token.
+- `AUTO_BUY_DELAY` — milliseconds to wait after a new pool or curve is seen.
+- `MAX_BUY_RETRIES` — buy attempts. Each attempt uses a fresh blockhash.
+- `BUY_SLIPPAGE` — percent.
 
-- `AUTO_SELL` - Set to `true` to enable automatic selling of tokens.
-  - If you want to manually sell bought tokens, disable this option.
-- `MAX_SELL_RETRIES` - Maximum number of retries for selling a token.
-- `AUTO_SELL_DELAY` - Delay in milliseconds before auto-selling a token.
-- `PRICE_CHECK_INTERVAL` - Interval in milliseconds for checking the take profit and stop loss conditions.
-  - Set to zero to disable take profit and stop loss.
-- `PRICE_CHECK_DURATION` - Time in milliseconds to wait for stop loss/take profit conditions.
-  - If you don't reach profit or loss bot will auto sell after this time.
-  - Set to zero to disable take profit and stop loss.
-- `TAKE_PROFIT` - Percentage profit at which to take profit.
-  - Take profit is calculated based on quote mint.
-- `STOP_LOSS` - Percentage loss at which to stop the loss.
-  - Stop loss is calculated based on quote mint.
-- `SELL_SLIPPAGE` - Slippage %.
+### Sell
 
-#### Snipe list
+- `AUTO_SELL` — sell when the wallet's token account changes. With `DRY_RUN`, the sell path runs from the quoted fill because no token account is created.
+- `MAX_SELL_RETRIES` — sell attempts. Slippage increases by `SELL_SLIPPAGE_STEP` each time, and the last attempt accepts any output.
+- `AUTO_SELL_DELAY` — milliseconds before the sell path starts.
+- `PRICE_CHECK_INTERVAL` — heartbeat, in milliseconds, for take-profit and stop-loss. `0` disables both.
+- `PRICE_CHECK_DURATION` — give up and sell after this many milliseconds.
+- `PRICE_CHECK_WEBSOCKET` — also reprice when the Raydium quote vault, bonding curve, or PumpSwap quote vault changes.
+- `TAKE_PROFIT` / `STOP_LOSS` — percent from the quote spent.
+- `SELL_SLIPPAGE` — starting sell slippage percent.
+- `SELL_SLIPPAGE_STEP` — added on each failed sell, capped at 99 until the final attempt.
 
-- `USE_SNIPE_LIST` - Set to `true` to enable buying only tokens listed in `snipe-list.txt`.
-  - Pool must not exist before the bot starts.
-  - If token can be traded before bot starts nothing will happen. Bot will not buy the token.
-- `SNIPE_LIST_REFRESH_INTERVAL` - Interval in milliseconds to refresh the snipe list.
-  - You can update snipe list while bot is running. It will pickup the new changes each time it does refresh.
+### Snipe list
 
-Note: When using snipe list filters below will be disabled.
+- `USE_SNIPE_LIST` — buy only mints listed in `snipe-list.txt`. Applies to every venue and disables Raydium pool filters.
+- `SNIPE_LIST_REFRESH_INTERVAL` — reload interval.
 
-#### Filters
+### Raydium filters
 
-- `FILTER_CHECK_INTERVAL` - Interval in milliseconds for checking if pool match the filters.
-  - Set to zero to disable filters.
-- `FILTER_CHECK_DURATION` - Time in milliseconds to wait for pool to match the filters.
-  - If pool doesn't match the filter buy will not happen.
-  - Set to zero to disable filters.
-- `CONSECUTIVE_FILTER_MATCHES` - How many times in a row pool needs to match the filters.
-  - This is useful because when pool is burned (and rugged), other filters may not report the same behavior. eg. pool size may still have old value
-- `CHECK_IF_MUTABLE` - Set to `true` to buy tokens only if their metadata are not mutable.
-- `CHECK_IF_SOCIALS` - Set to `true` to buy tokens only if they have at least 1 social.
-- `CHECK_IF_MINT_IS_RENOUNCED` - Set to `true` to buy tokens only if their mint is renounced.
-- `CHECK_IF_FREEZABLE` - Set to `true` to buy tokens only if they are not freezable.
-- `CHECK_IF_BURNED` - Set to `true` to buy tokens only if their liquidity pool is burned.
-- `MIN_POOL_SIZE` - Bot will buy only if the pool size is greater than or equal the specified amount.
-  - Set `0` to disable.
-- `MAX_POOL_SIZE` - Bot will buy only if the pool size is less than or equal the specified amount.
-  - Set `0` to disable.
+- `FILTER_CHECK_INTERVAL` / `FILTER_CHECK_DURATION` — how often and how long to re-check filters. `0` skips the wait.
+- `CONSECUTIVE_FILTER_MATCHES` — matches required in a row.
+- `CHECK_IF_MUTABLE` — require immutable metadata. Also applied to pump mints.
+- `CHECK_IF_SOCIALS` — require a non-empty metadata extension. Raydium only. Fetches the creator's metadata URL.
+- `CHECK_IF_MINT_IS_RENOUNCED` — require no mint authority. Also applied to pump mints.
+- `CHECK_IF_FREEZABLE` — reject a mint that still has a freeze authority. Also applied to pump mints.
+- `CHECK_IF_BURNED` — require burned LP. Raydium only.
+- `MIN_POOL_SIZE` / `MAX_POOL_SIZE` — quote-vault size. `0` disables that side. Raydium only.
 
-## Warp transactions (RC)
+### pump.fun filters
 
-In case you experience a lot of failed transactions or transaction performance is too slow, you can try using `warp` for executing transactions.
-Warp is hosted service that executes transactions using integrations with third party providers.
+A numeric `0` disables that bound. `PUMP_MAX_CURVE_PROGRESS=100` allows any incomplete curve.
 
-Note: Warp transactions are disabled by default.
+- `PUMP_MIN_CURVE_PROGRESS` / `PUMP_MAX_CURVE_PROGRESS` — percent of the initial real token reserves sold.
+- `PUMP_MIN_MARKET_CAP_SOL` / `PUMP_MAX_MARKET_CAP_SOL` — virtual-reserve market cap, in SOL.
+- `PUMP_MIN_DEV_BUY_SOL` / `PUMP_MAX_DEV_BUY_SOL` — spot SOL value of the creator's token balance.
+- `PUMP_MAX_CREATOR_HOLD_PERCENT` — creator balance divided by total supply.
+- `PUMP_MIN_UNIQUE_BUYERS` — distinct buy-event users seen since the process started.
+- `PUMP_BUYER_WAIT_MS` — how long to wait for `PUMP_MIN_UNIQUE_BUYERS`.
+- `PUMP_MAX_REAL_SOL` — skip a curve that already holds more quote than this.
+- `PUMP_SKIP_MAYHEM` — skip mayhem-mode coins.
+- `PUMP_ALLOW_NON_SOL_QUOTE` — reserved. Non-SOL quotes are not bought.
+- `PUMP_CREATOR_BLACKLIST` — path to a text file of creator addresses. Reloaded when the file changes.
 
-### Security
+Program ids and instruction accounts come from `pump-fun/pump-public-docs` (`idl/pump.ts`, `idl/pump_amm.ts`, and the v3 / PumpSwap v2 trade docs). Bonding-curve fees in the quoter are 0.95% protocol + 0.30% creator. PumpSwap quotes use the 0–420 SOL tier from the 17 October 2026 fee schedule (0.93% protocol + 0.30% creator + 0.02% LP). A higher creator fee on the account is used when it is set. These quotes were not simulated against mainnet.
 
-When using warp, transaction is sent to the hosted service.
-**Payload that is being sent will NOT contain your wallet private key**. Fee transaction is signed on your machine.
-Each request is processed by hosted service and sent to third party provider.
-**We don't store your transactions, nor we store your private key.**
+## What was not verified on mainnet
 
-Note: Warp transactions are disabled by default.
+No mainnet transaction was sent. Unit tests cover key parsing, quote math, account offsets, event decoding, and the published program-id seeds. They do not prove a buy or sell lands.
 
-### Fees
+Known risks:
 
-When using warp for transactions, fee is distributed between developers of warp and third party providers.
-In case TX fails, no fee will be taken from your account.
+- Pump and PumpSwap account layouts and fee tiers change. A layout shift makes the quoter or the account list wrong, and transactions fail or, worse, price off the wrong reserves.
+- The final sell retry uses 100% slippage, so that attempt can be sandwiched down to dust.
+- `onLogs` for the pump programs needs an RPC that actually pushes those logs. The public endpoint often does not.
+- Token-2022 accounts with extensions are watched without a fixed data-size filter. A mint whose account cannot be closed will fail the close instruction; the last sell attempts omit it.
+- Warp and Jito still send signed transactions to third parties when selected.
+- This is not a promise of profit. Sniping new tokens is a way to lose the quote amount.
 
-## Common issues
+## Scripts
 
-If you encounter an error that is not listed here, please contact me.
-To collect more information on an issue, please change `LOG_LEVEL` to `debug`.
-
-### Unsupported RPC node
-
-- If you see following error in your log file:  
-  `Error: 410 Gone:  {"jsonrpc":"2.0","error":{"code": 410, "message":"The RPC call or parameters have been disabled."}, "id": "986f3599-b2b7-47c4-b951-074c19842bad" }`  
-  it means your RPC node doesn't support methods needed to execute script.
-  - FIX: Change your RPC node. You can use Helius or Quicknode. I recommend Helius.
-
-### No token account
-
-- If you see following error in your log file:  
-  `Error: No SOL token account found in wallet: `  
-  it means that wallet you provided doesn't have USDC/WSOL token account.
-  - FIX: Go to https://jup.ag/ and swap some SOL to USDC/WSOL.
-
-    
-## Support
-
-
-- The current version has undergone multiple audits and testing, demonstrates strong profitability, and is free of errors. However, you should always pay attention to market changes and make adjustments accordingly. If you happen to encounter an overall market downturn while using it, I suggest waiting until the market stabilizes before running it again.
-
-- If it helps you, please leave a star🌟. It will have a positive impact on future maintenance.
-
-
-## Disclaimer
-
-The Solana Trading Bot is provided as is, for learning purposes.
-Trading cryptocurrencies and tokens involves risk, and past performance is not indicative of future results.
-The use of this bot is at your own risk, and we are not responsible for any losses incurred while using the bot. 
+- `npm run start` — run the bot.
+- `npm run tsc` — typecheck.
+- `npm test` — unit tests. They do not use a funded wallet or broadcast.

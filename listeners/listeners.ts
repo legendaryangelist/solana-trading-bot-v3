@@ -1,14 +1,20 @@
-import { LIQUIDITY_STATE_LAYOUT_V4, MAINNET_PROGRAM_ID, MARKET_STATE_LAYOUT_V3, Token } from '@raydium-io/raydium-sdk'; 
+import { LIQUIDITY_STATE_LAYOUT_V4, MAINNET_PROGRAM_ID, MARKET_STATE_LAYOUT_V3, Token } from '@raydium-io/raydium-sdk';
 import bs58 from 'bs58';
-import { Connection, PublicKey } from '@solana/web3.js';
-import { TOKEN_PROGRAM_ID } from '@solana/spl-token';
+import { Connection, GetProgramAccountsFilter, PublicKey } from '@solana/web3.js';
+import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import { EventEmitter } from 'events';
-import { API_URL, checkStatus } from '../helpers';
+import { PUMP_AMM_PROGRAM_ID, PUMP_PROGRAM_ID } from '../pump/constants';
+import { decodeProgramDataLogs, parseCreateEvent, parseCreatePoolEvent, parseTradeEvent } from '../pump/events';
+import { BuyerTracker } from '../pump/tracking';
+import { logger } from '../helpers/logger';
 
 export class Listeners extends EventEmitter {
   private subscriptions: number[] = [];
 
-  constructor(private readonly connection: Connection) {
+  constructor(
+    private readonly connection: Connection,
+    private readonly buyers: BuyerTracker,
+  ) {
     super();
   }
 
@@ -17,18 +23,37 @@ export class Listeners extends EventEmitter {
     quoteToken: Token;
     autoSell: boolean;
     cacheNewMarkets: boolean;
+    enableRaydium: boolean;
+    enablePumpfun: boolean;
+    enablePumpswap: boolean;
   }) {
-    if (config.cacheNewMarkets) {
+    if (config.enableRaydium && config.cacheNewMarkets) {
       const openBookSubscription = await this.subscribeToOpenBookMarkets(config);
       this.subscriptions.push(openBookSubscription);
     }
 
-    const raydiumSubscription = await this.subscribeToRaydiumPools(config);
-    this.subscriptions.push(raydiumSubscription);
+    if (config.enableRaydium) {
+      const raydiumSubscription = await this.subscribeToRaydiumPools(config);
+      this.subscriptions.push(raydiumSubscription);
+    }
+
+    if (config.enablePumpfun) {
+      const pumpSubscription = await this.subscribeToPumpCreates();
+      this.subscriptions.push(pumpSubscription);
+    }
+
+    if (config.enablePumpswap) {
+      const pumpSwapSubscription = await this.subscribeToPumpSwapPools();
+      this.subscriptions.push(pumpSwapSubscription);
+    }
 
     if (config.autoSell) {
-      const walletSubscription = await this.subscribeToWalletChanges(config);
+      const walletSubscription = await this.subscribeToWalletChanges(config, TOKEN_PROGRAM_ID, true);
       this.subscriptions.push(walletSubscription);
+      if (config.enablePumpfun || config.enablePumpswap) {
+        const token2022Subscription = await this.subscribeToWalletChanges(config, TOKEN_2022_PROGRAM_ID, false);
+        this.subscriptions.push(token2022Subscription);
+      }
     }
   }
 
@@ -52,10 +77,6 @@ export class Listeners extends EventEmitter {
   }
 
   private async subscribeToRaydiumPools(config: { quoteToken: Token }) {
-    const response = await fetch(API_URL);
-    const data = await response.text();
-    checkStatus(data);
-
     return this.connection.onProgramAccountChange(
       MAINNET_PROGRAM_ID.AmmV4,
       async (updatedAccountInfo) => {
@@ -86,31 +107,94 @@ export class Listeners extends EventEmitter {
     );
   }
 
-  private async subscribeToWalletChanges(config: { walletPublicKey: PublicKey }) {
+  private async subscribeToPumpCreates() {
+    return this.connection.onLogs(
+      PUMP_PROGRAM_ID,
+      (logs) => {
+        if (logs.err) {
+          return;
+        }
+        try {
+          for (const data of decodeProgramDataLogs(logs.logs)) {
+            const trade = parseTradeEvent(data);
+            if (trade?.isBuy) {
+              this.buyers.record(trade.mint.toBase58(), trade.user.toBase58());
+            }
+            const created = parseCreateEvent(data);
+            if (created) {
+              this.emit('pumpCreate', created);
+            }
+          }
+        } catch (error) {
+          logger.debug({ error }, 'Failed to parse pump.fun logs');
+        }
+      },
+      this.connection.commitment,
+    );
+  }
+
+  private async subscribeToPumpSwapPools() {
+    return this.connection.onLogs(
+      PUMP_AMM_PROGRAM_ID,
+      (logs) => {
+        if (logs.err) {
+          return;
+        }
+        try {
+          for (const data of decodeProgramDataLogs(logs.logs)) {
+            const created = parseCreatePoolEvent(data);
+            if (created) {
+              this.emit('pumpPool', created);
+            }
+          }
+        } catch (error) {
+          logger.debug({ error }, 'Failed to parse PumpSwap logs');
+        }
+      },
+      this.connection.commitment,
+    );
+  }
+
+  private async subscribeToWalletChanges(
+    config: { walletPublicKey: PublicKey },
+    programId: PublicKey,
+    fixedSize: boolean,
+  ) {
+    const filters: GetProgramAccountsFilter[] = [
+      {
+        memcmp: {
+          offset: 32,
+          bytes: config.walletPublicKey.toBase58(),
+        },
+      },
+    ];
+    if (fixedSize) {
+      filters.unshift({ dataSize: 165 });
+    }
+
     return this.connection.onProgramAccountChange(
-      TOKEN_PROGRAM_ID,
+      programId,
       async (updatedAccountInfo) => {
         this.emit('wallet', updatedAccountInfo);
       },
       this.connection.commitment,
-      [
-        {
-          dataSize: 165,
-        },
-        {
-          memcmp: {
-            offset: 32,
-            bytes: config.walletPublicKey.toBase58(),
-          },
-        },
-      ],
+      filters,
     );
   }
 
   public async stop() {
-    for (let i = this.subscriptions.length; i >= 0; --i) {
+    for (let i = this.subscriptions.length - 1; i >= 0; i--) {
       const subscription = this.subscriptions[i];
-      await this.connection.removeAccountChangeListener(subscription);
+      try {
+        await this.connection.removeOnLogsListener(subscription);
+      } catch (error) {
+        logger.trace({ error }, 'Failed to remove logs listener');
+      }
+      try {
+        await this.connection.removeAccountChangeListener(subscription);
+      } catch (error) {
+        logger.trace({ error }, 'Failed to remove account listener');
+      }
       this.subscriptions.splice(i, 1);
     }
   }
