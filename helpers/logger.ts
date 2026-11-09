@@ -7,7 +7,7 @@ const transport = pino.transport({
 export const logger = pino(
   {
     level: 'info',
-    redact: ['poolKeys'],
+    redact: ['poolKeys', 'privateKey', 'secretKey', 'mnemonic', 'seed', 'PRIVATE_KEY'],
     serializers: {
       error: pino.stdSerializers.err,
     },

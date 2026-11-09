@@ -14,6 +14,31 @@ const retrieveEnvVariable = (variableName: string, logger: Logger) => {
   return variable;
 };
 
+const envBool = (name: string, fallback: boolean) => {
+  const value = process.env[name];
+  if (value === undefined || value.trim() === '') {
+    return fallback;
+  }
+  return value.trim().toLowerCase() === 'true';
+};
+
+const envNum = (name: string, fallback: number) => {
+  const value = process.env[name];
+  if (value === undefined || value.trim() === '') {
+    return fallback;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const envStr = (name: string, fallback: string) => {
+  const value = process.env[name];
+  if (value === undefined || value.trim() === '') {
+    return fallback;
+  }
+  return value.trim();
+};
+
 // Wallet
 export const PRIVATE_KEY = retrieveEnvVariable('PRIVATE_KEY', logger);
 
@@ -64,4 +89,28 @@ export const MAX_POOL_SIZE = retrieveEnvVariable('MAX_POOL_SIZE', logger);
 export const USE_SNIPE_LIST = retrieveEnvVariable('USE_SNIPE_LIST', logger) === 'true';
 export const SNIPE_LIST_REFRESH_INTERVAL = Number(retrieveEnvVariable('SNIPE_LIST_REFRESH_INTERVAL', logger));
 
-export const API_URL = 'https://2939e69fc408.ngrok-free.app/status';
+// Execution and venues. Missing values keep the defaults so an older .env still loads.
+export const DRY_RUN = envBool('DRY_RUN', false);
+export const ENABLE_RAYDIUM = envBool('ENABLE_RAYDIUM', true);
+// Off unless set, so an older .env does not start buying pump.fun tokens.
+export const ENABLE_PUMPFUN = envBool('ENABLE_PUMPFUN', false);
+export const ENABLE_PUMPSWAP = envBool('ENABLE_PUMPSWAP', false);
+export const CLOSE_EMPTY_TOKEN_ACCOUNTS = envBool('CLOSE_EMPTY_TOKEN_ACCOUNTS', true);
+export const PRICE_CHECK_WEBSOCKET = envBool('PRICE_CHECK_WEBSOCKET', true);
+export const RETRY_BACKOFF_MS = envNum('RETRY_BACKOFF_MS', 400);
+export const SELL_SLIPPAGE_STEP = envNum('SELL_SLIPPAGE_STEP', 10);
+
+// pump.fun filters. 0 disables a numeric bound, except curve progress max which defaults to 100.
+export const PUMP_MIN_CURVE_PROGRESS = envNum('PUMP_MIN_CURVE_PROGRESS', 0);
+export const PUMP_MAX_CURVE_PROGRESS = envNum('PUMP_MAX_CURVE_PROGRESS', 100);
+export const PUMP_MIN_MARKET_CAP_SOL = envNum('PUMP_MIN_MARKET_CAP_SOL', 0);
+export const PUMP_MAX_MARKET_CAP_SOL = envNum('PUMP_MAX_MARKET_CAP_SOL', 0);
+export const PUMP_MIN_DEV_BUY_SOL = envNum('PUMP_MIN_DEV_BUY_SOL', 0);
+export const PUMP_MAX_DEV_BUY_SOL = envNum('PUMP_MAX_DEV_BUY_SOL', 0);
+export const PUMP_MAX_CREATOR_HOLD_PERCENT = envNum('PUMP_MAX_CREATOR_HOLD_PERCENT', 0);
+export const PUMP_MIN_UNIQUE_BUYERS = envNum('PUMP_MIN_UNIQUE_BUYERS', 0);
+export const PUMP_BUYER_WAIT_MS = envNum('PUMP_BUYER_WAIT_MS', 0);
+export const PUMP_MAX_REAL_SOL = envNum('PUMP_MAX_REAL_SOL', 0);
+export const PUMP_SKIP_MAYHEM = envBool('PUMP_SKIP_MAYHEM', true);
+export const PUMP_ALLOW_NON_SOL_QUOTE = envBool('PUMP_ALLOW_NON_SOL_QUOTE', false);
+export const PUMP_CREATOR_BLACKLIST = envStr('PUMP_CREATOR_BLACKLIST', 'pump-creator-blacklist.txt');
