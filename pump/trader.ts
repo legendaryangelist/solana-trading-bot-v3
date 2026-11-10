@@ -17,6 +17,7 @@ import {
   BONDING_CURVE_PROTOCOL_FEE_BPS,
   DEFAULT_INITIAL_REAL_TOKEN_RESERVES,
   isSolQuoteMint,
+  orientSolPair,
   PUMPSWAP_CREATOR_FEE_BPS,
   PUMPSWAP_LP_FEE_BPS,
   PUMPSWAP_PROTOCOL_FEE_BPS,
@@ -98,10 +99,22 @@ export class PumpTrader {
     private readonly blacklist: CreatorBlacklist,
   ) {}
 
-  async buyCreate(event: PumpCreateEvent): Promise<{ tokensOut: bigint; position: PumpPosition } | null> {
+  async screenCreate(event: PumpCreateEvent): Promise<{
+    event: PumpCreateEvent;
+    tokenProgram: PublicKey;
+    initialReal: bigint;
+    protocolFeeBps: bigint;
+    creatorFeeBps: bigint;
+    expected: bigint;
+    recipient: PublicKey;
+    creator: PublicKey;
+  } | null> {
     const mint = event.mint.toBase58();
     if (!isSolQuoteMint(event.quoteMint)) {
-      logger.debug({ mint }, 'Skipping pump create because the quote mint is not SOL');
+      logger.debug(
+        { mint, quoteMint: event.quoteMint.toBase58() },
+        'Skipping pump create because the quote mint is not SOL. The coin exists, but it is paired with another asset.',
+      );
       return null;
     }
 
@@ -179,13 +192,37 @@ export class PumpTrader {
       return null;
     }
 
+    return {
+      event,
+      tokenProgram,
+      initialReal,
+      protocolFeeBps,
+      creatorFeeBps,
+      expected,
+      recipient,
+      creator: curve.creator,
+    };
+  }
+
+  async commitCreate(screened: {
+    event: PumpCreateEvent;
+    tokenProgram: PublicKey;
+    initialReal: bigint;
+    protocolFeeBps: bigint;
+    creatorFeeBps: bigint;
+    expected: bigint;
+    recipient: PublicKey;
+    creator: PublicKey;
+  }): Promise<{ tokensOut: bigint; position: PumpPosition } | null> {
+    const { event, tokenProgram, initialReal, protocolFeeBps, creatorFeeBps, expected, recipient } = screened;
+    const mint = event.mint.toBase58();
     const position: PumpPosition = {
       venue: 'pump',
       mint: event.mint,
       bondingCurve: bondingCurvePda(event.mint),
       quoteMint: NATIVE_MINT,
       baseTokenProgram: tokenProgram,
-      creator: curve.creator,
+      creator: screened.creator,
       initialRealTokenReserves: initialReal,
     };
     this.positions.set(position);
@@ -216,28 +253,44 @@ export class PumpTrader {
       return null;
     }
 
-    logger.info(
-      { mint, creator: event.creator.toBase58(), mcapSol: lamportsToSol(marketCapLamports(curve.virtualQuoteReserves, curve.virtualTokenReserves, curve.tokenTotalSupply)) },
-      'Pump buy submitted',
-    );
+    logger.info({ mint, creator: event.creator.toBase58(), tokensOut: expected.toString() }, 'Pump buy transaction confirmed');
     return { tokensOut: expected, position };
   }
 
-  async buyPool(event: CreatePoolEvent): Promise<{ tokensOut: bigint; position: PumpSwapPosition } | null> {
-    const mint = event.baseMint.toBase58();
-    if (!isSolQuoteMint(event.quoteMint)) {
-      logger.debug({ mint }, 'Skipping PumpSwap pool because the quote mint is not SOL');
+  async screenPool(event: CreatePoolEvent): Promise<{
+    position: PumpSwapPosition;
+    feeBps: bigint;
+    expected: bigint;
+    buybackAta: PublicKey;
+  } | null> {
+    const oriented = orientSolPair(event.baseMint, event.quoteMint);
+    if (!oriented) {
+      logger.debug(
+        { baseMint: event.baseMint.toBase58(), quoteMint: event.quoteMint.toBase58() },
+        'Skipping PumpSwap pool because neither mint is SOL',
+      );
       return null;
     }
+    const mint = oriented.tokenMint.toBase58();
+    if (!oriented.tokenIsBase) {
+      logger.debug(
+        { mint, baseMint: event.baseMint.toBase58(), quoteMint: event.quoteMint.toBase58() },
+        'PumpSwap pool has SOL on the base side. The token mint above is the quote.',
+      );
+    }
 
-    const canonical = canonicalPumpPoolPda(event.baseMint);
-    const graduation = event.creator.equals(pumpPoolAuthorityPda(event.baseMint)) || event.pool.equals(canonical);
+    const canonical = canonicalPumpPoolPda(oriented.tokenMint);
+    const graduation =
+      event.creator.equals(pumpPoolAuthorityPda(oriented.tokenMint)) || event.pool.equals(canonical);
     if (!event.pool.equals(canonical) && !graduation) {
       logger.debug({ mint }, 'Skipping PumpSwap pool that is not a pump.fun graduation');
       return null;
     }
     if (this.config.filters.skipMayhem && event.isMayhemMode) {
-      logger.debug({ mint }, 'Skipping mayhem PumpSwap pool');
+      logger.debug(
+        { mint },
+        'Skipping PumpSwap pool: mayhem mode is enabled and PUMP_SKIP_MAYHEM=true. Set PUMP_SKIP_MAYHEM=false to buy these.',
+      );
       return null;
     }
     if (this.blacklist.has(event.coinCreator.toBase58()) || this.blacklist.has(event.creator.toBase58())) {
@@ -252,8 +305,17 @@ export class PumpTrader {
       return null;
     }
 
-    const baseProgram = await this.resolveTokenProgram(pool.baseMint, TOKEN_PROGRAM_ID);
-    if (!baseProgram || !(await this.mintAllowed(pool.baseMint))) {
+    const poolOrient = orientSolPair(pool.baseMint, pool.quoteMint);
+    if (!poolOrient) {
+      logger.debug(
+        { mint, baseMint: pool.baseMint.toBase58(), quoteMint: pool.quoteMint.toBase58() },
+        'Skipping PumpSwap pool because the pool account is not a SOL pair',
+      );
+      return null;
+    }
+    const tokenMint = poolOrient.tokenMint;
+    const tokenProgram = await this.resolveTokenProgram(tokenMint, TOKEN_PROGRAM_ID);
+    if (!tokenProgram || !(await this.mintAllowed(tokenMint))) {
       return null;
     }
 
@@ -262,9 +324,11 @@ export class PumpTrader {
       return null;
     }
     const feeBps = PUMPSWAP_LP_FEE_BPS + PUMPSWAP_PROTOCOL_FEE_BPS + higherFee(pool.creatorFeeBps, PUMPSWAP_CREATOR_FEE_BPS);
-    const expected = quotePumpSwapBuy(this.config.quoteLamports, reserves.base, reserves.quote, feeBps);
+    const expected = poolOrient.tokenIsBase
+      ? quotePumpSwapBuy(this.config.quoteLamports, reserves.base, reserves.quote, feeBps)
+      : quotePumpSwapSell(this.config.quoteLamports, reserves.base, reserves.quote, feeBps);
     if (expected <= 0n) {
-      logger.info({ mint }, 'Skipping PumpSwap buy because the quoted token output is zero');
+      logger.info({ mint: tokenMint.toBase58() }, 'Skipping PumpSwap buy because the quoted token output is zero');
       return null;
     }
 
@@ -276,41 +340,77 @@ export class PumpTrader {
 
     const position: PumpSwapPosition = {
       venue: 'pumpswap',
-      mint: pool.baseMint,
+      mint: tokenMint,
       pool: event.pool,
       baseMint: pool.baseMint,
-      quoteMint: NATIVE_MINT,
+      quoteMint: pool.quoteMint,
       poolBaseTokenAccount: pool.poolBaseTokenAccount,
       poolQuoteTokenAccount: pool.poolQuoteTokenAccount,
-      baseTokenProgram: baseProgram,
-      quoteTokenProgram: TOKEN_PROGRAM_ID,
+      baseTokenProgram: poolOrient.tokenIsBase ? tokenProgram : TOKEN_PROGRAM_ID,
+      quoteTokenProgram: poolOrient.tokenIsBase ? TOKEN_PROGRAM_ID : tokenProgram,
       coinCreator: pool.coinCreator,
       creatorFeeBps: pool.creatorFeeBps,
       virtualQuoteReserves: pool.virtualQuoteReserves > 0n ? pool.virtualQuoteReserves : 0n,
+      tokenIsBase: poolOrient.tokenIsBase,
     };
-    this.positions.set(position);
+    return { position, feeBps, expected, buybackAta };
+  }
 
+  async commitPool(screened: {
+    position: PumpSwapPosition;
+    feeBps: bigint;
+    expected: bigint;
+    buybackAta: PublicKey;
+  }): Promise<{ tokensOut: bigint; position: PumpSwapPosition } | null> {
+    const { position, feeBps, expected, buybackAta } = screened;
+    const mint = position.mint.toBase58();
+    this.positions.set(position);
     const deficit = await this.wrapDeficit(this.config.quoteLamports);
+    const tokenProgram = position.tokenIsBase ? position.baseTokenProgram : position.quoteTokenProgram;
     const bought = await this.execute(mint, 'buy', async (slippage) => {
-      const live = await this.poolReserves(pool.poolBaseTokenAccount, pool.poolQuoteTokenAccount, position.virtualQuoteReserves);
-      const quoted = live ? quotePumpSwapBuy(this.config.quoteLamports, live.base, live.quote, feeBps) : expected;
+      const live = await this.poolReserves(
+        position.poolBaseTokenAccount,
+        position.poolQuoteTokenAccount,
+        position.virtualQuoteReserves,
+      );
+      const quoted = live
+        ? position.tokenIsBase
+          ? quotePumpSwapBuy(this.config.quoteLamports, live.base, live.quote, feeBps)
+          : quotePumpSwapSell(this.config.quoteLamports, live.base, live.quote, feeBps)
+        : expected;
+      const minOut = applySlippage(quoted > 0n ? quoted : expected, slippage);
+      const trade = position.tokenIsBase
+        ? pumpSwapBuyIx({
+            user: this.config.wallet.publicKey,
+            pool: position.pool,
+            baseMint: position.baseMint,
+            quoteMint: position.quoteMint,
+            poolBase: position.poolBaseTokenAccount,
+            poolQuote: position.poolQuoteTokenAccount,
+            baseTokenProgram: position.baseTokenProgram,
+            quoteTokenProgram: position.quoteTokenProgram,
+            spendableQuoteIn: this.config.quoteLamports,
+            minBaseOut: minOut,
+            buybackQuoteAta: buybackAta,
+          })
+        : pumpSwapSellIx({
+            user: this.config.wallet.publicKey,
+            pool: position.pool,
+            baseMint: position.baseMint,
+            quoteMint: position.quoteMint,
+            poolBase: position.poolBaseTokenAccount,
+            poolQuote: position.poolQuoteTokenAccount,
+            baseTokenProgram: position.baseTokenProgram,
+            quoteTokenProgram: position.quoteTokenProgram,
+            baseAmountIn: this.config.quoteLamports,
+            minQuoteOut: minOut,
+            buybackQuoteAta: buybackAta,
+          });
       return this.compile([
         ...this.priorityFeeIxs(),
-        createBaseAtaIx(this.config.wallet.publicKey, pool.baseMint, this.config.wallet.publicKey, baseProgram),
+        createBaseAtaIx(this.config.wallet.publicKey, position.mint, this.config.wallet.publicKey, tokenProgram),
         ...wrapSolIxs(this.config.wallet.publicKey, deficit),
-        pumpSwapBuyIx({
-          user: this.config.wallet.publicKey,
-          pool: event.pool,
-          baseMint: pool.baseMint,
-          quoteMint: NATIVE_MINT,
-          poolBase: pool.poolBaseTokenAccount,
-          poolQuote: pool.poolQuoteTokenAccount,
-          baseTokenProgram: baseProgram,
-          quoteTokenProgram: TOKEN_PROGRAM_ID,
-          spendableQuoteIn: this.config.quoteLamports,
-          minBaseOut: applySlippage(quoted > 0n ? quoted : expected, slippage),
-          buybackQuoteAta: buybackAta,
-        }),
+        trade,
       ]);
     });
 
@@ -402,6 +502,9 @@ export class PumpTrader {
       return false;
     }
     const feeBps = PUMPSWAP_LP_FEE_BPS + PUMPSWAP_PROTOCOL_FEE_BPS + higherFee(position.creatorFeeBps, PUMPSWAP_CREATOR_FEE_BPS);
+    if (!position.tokenIsBase) {
+      return this.sellFlippedPumpSwap(position, amount, buybackAta, feeBps);
+    }
 
     await this.holdForExit(position.poolQuoteTokenAccount, async () => {
       const reserves = await this.poolReserves(position.poolBaseTokenAccount, position.poolQuoteTokenAccount, position.virtualQuoteReserves);
@@ -446,6 +549,62 @@ export class PumpTrader {
     return sold;
   }
 
+  /** SOL is the pool base and the token is the quote. Spend the token to receive SOL. */
+  private async sellFlippedPumpSwap(
+    position: PumpSwapPosition,
+    amount: bigint,
+    buybackAta: PublicKey,
+    feeBps: bigint,
+  ): Promise<boolean> {
+    await this.holdForExit(position.poolBaseTokenAccount, async () => {
+      const reserves = await this.poolReserves(
+        position.poolBaseTokenAccount,
+        position.poolQuoteTokenAccount,
+        position.virtualQuoteReserves,
+      );
+      if (!reserves) {
+        throw new Error('pool reserves missing');
+      }
+      return quotePumpSwapBuy(amount, reserves.base, reserves.quote, feeBps);
+    });
+
+    const sold = await this.execute(position.mint.toBase58(), 'sell', async (slippage, attempt, max) => {
+      const reserves = await this.poolReserves(
+        position.poolBaseTokenAccount,
+        position.poolQuoteTokenAccount,
+        position.virtualQuoteReserves,
+      );
+      const quoted = reserves ? quotePumpSwapBuy(amount, reserves.base, reserves.quote, feeBps) : 0n;
+      if (quoted <= 0n && slippage < 100) {
+        throw new Error('PumpSwap quote unavailable');
+      }
+      const includeClose = this.config.closeEmptyTokenAccounts && attempt < max - 2;
+      return this.compile([
+        ...this.priorityFeeIxs(),
+        pumpSwapBuyIx({
+          user: this.config.wallet.publicKey,
+          pool: position.pool,
+          baseMint: position.baseMint,
+          quoteMint: position.quoteMint,
+          poolBase: position.poolBaseTokenAccount,
+          poolQuote: position.poolQuoteTokenAccount,
+          baseTokenProgram: position.baseTokenProgram,
+          quoteTokenProgram: position.quoteTokenProgram,
+          spendableQuoteIn: amount,
+          minBaseOut: applySlippage(quoted, slippage),
+          buybackQuoteAta: buybackAta,
+        }),
+        ...(includeClose
+          ? [closeBaseAtaIx(position.mint, this.config.wallet.publicKey, position.quoteTokenProgram)]
+          : []),
+      ]);
+    });
+    if (sold) {
+      this.positions.delete(position.mint.toBase58());
+    }
+    return sold;
+  }
+
   private async positionFromCanonicalPool(position: PumpPosition): Promise<PumpSwapPosition | null> {
     const poolAddress = canonicalPumpPoolPda(position.mint);
     const info = await this.connection.getAccountInfo(poolAddress, this.connection.commitment);
@@ -467,6 +626,7 @@ export class PumpTrader {
       coinCreator: pool.coinCreator,
       creatorFeeBps: pool.creatorFeeBps,
       virtualQuoteReserves: pool.virtualQuoteReserves > 0n ? pool.virtualQuoteReserves : 0n,
+      tokenIsBase: orientSolPair(pool.baseMint, pool.quoteMint)?.tokenIsBase ?? true,
     };
   }
 

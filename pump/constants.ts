@@ -50,6 +50,25 @@ export function isSolQuoteMint(mint: PublicKey): boolean {
   return mint.equals(PublicKey.default) || mint.equals(NATIVE_MINT);
 }
 
+/**
+ * SOL pairs are not always token-base / SOL-quote. Canonical graduations are.
+ * Other pools put WSOL on the base side. Return the non-SOL mint either way.
+ */
+export function orientSolPair(
+  base: PublicKey,
+  quote: PublicKey,
+): { tokenMint: PublicKey; solMint: PublicKey; tokenIsBase: boolean } | null {
+  const baseSol = isSolQuoteMint(base);
+  const quoteSol = isSolQuoteMint(quote);
+  if (quoteSol && !baseSol) {
+    return { tokenMint: base, solMint: effectiveQuoteMint(quote), tokenIsBase: true };
+  }
+  if (baseSol && !quoteSol) {
+    return { tokenMint: quote, solMint: effectiveQuoteMint(base), tokenIsBase: false };
+  }
+  return null;
+}
+
 export function effectiveQuoteMint(mint: PublicKey): PublicKey {
   return isSolQuoteMint(mint) ? NATIVE_MINT : mint;
 }

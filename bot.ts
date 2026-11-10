@@ -20,7 +20,6 @@ import { PoolFilters } from './filters';
 import { TransactionExecutor } from './transactions';
 import { createPoolKeys, logger, NETWORK, sleep } from './helpers';
 import { watchAccountUntil } from './helpers/price-watch';
-import { Mutex } from 'async-mutex';
 import BN from 'bn.js';
 import { WarpTransactionExecutor } from './transactions/warp-transaction-executor';
 import { JitoTransactionExecutor } from './transactions/jito-rpc-transaction-executor';
@@ -82,11 +81,10 @@ export class Bot {
   private readonly snipeListCache?: SnipeListCache;
 
   // one token at the time
-  private readonly mutex: Mutex;
   private sellExecutionCount = 0;
+  private openPositionMint: string | null = null;
   private readonly positions = new PositionBook();
   private readonly pumpTrader: PumpTrader;
-  private readonly buying = new Set<string>();
   public readonly isWarp: boolean = false;
   public readonly isJito: boolean = false;
 
@@ -100,7 +98,6 @@ export class Bot {
     this.isWarp = txExecutor instanceof WarpTransactionExecutor;
     this.isJito = txExecutor instanceof JitoTransactionExecutor;
 
-    this.mutex = new Mutex();
     this.poolFilters = new PoolFilters(connection, {
       quoteToken: this.config.quoteToken,
       minPoolSize: this.config.minPoolSize,
@@ -196,34 +193,28 @@ export class Bot {
       await sleep(this.config.autoBuyDelay);
     }
 
-    if (this.config.oneTokenAtATime) {
-      if (this.mutex.isLocked() || this.sellExecutionCount > 0) {
-        logger.debug(
-          { mint: poolState.baseMint.toString() },
-          `Skipping buy because one token at a time is turned on and token is already being processed`,
-        );
+    const [market, mintAta] = await Promise.all([
+      this.marketStorage.get(poolState.marketId.toString()),
+      getAssociatedTokenAddress(poolState.baseMint, this.config.wallet.publicKey),
+    ]);
+    const poolKeys: LiquidityPoolKeysV4 = createPoolKeys(accountId, poolState, market);
+
+    if (!this.config.useSnipeList) {
+      const match = await this.filterMatch(poolKeys);
+
+      if (!match) {
+        logger.trace({ mint: poolKeys.baseMint.toString() }, `Skipping buy because pool doesn't match filters`);
         return;
       }
+    }
 
-      await this.mutex.acquire();
+    const mint = poolState.baseMint.toString();
+    if (!this.beginPosition(mint)) {
+      return;
     }
 
     try {
-      const [market, mintAta] = await Promise.all([
-        this.marketStorage.get(poolState.marketId.toString()),
-        getAssociatedTokenAddress(poolState.baseMint, this.config.wallet.publicKey),
-      ]);
-      const poolKeys: LiquidityPoolKeysV4 = createPoolKeys(accountId, poolState, market);
-
-      if (!this.config.useSnipeList) {
-        const match = await this.filterMatch(poolKeys);
-
-        if (!match) {
-          logger.trace({ mint: poolKeys.baseMint.toString() }, `Skipping buy because pool doesn't match filters`);
-          return;
-        }
-      }
-
+      let confirmed = false;
       for (let i = 0; i < this.config.maxBuyRetries; i++) {
         if (i > 0 && this.config.retryBackoffMs > 0) {
           await sleep(this.config.retryBackoffMs * i);
@@ -247,13 +238,14 @@ export class Bot {
           );
 
           if (result.confirmed) {
+            confirmed = true;
             logger.info(
               {
                 mint: poolState.baseMint.toString(),
                 signature: result.signature,
                 url: `https://solscan.io/tx/${result.signature}?cluster=${NETWORK}`,
               },
-              `Confirmed buy tx`,
+              this.config.dryRun ? 'DRY_RUN simulated Raydium buy' : `Confirmed buy tx`,
             );
 
             break;
@@ -274,17 +266,12 @@ export class Bot {
     } catch (error) {
       logger.error({ mint: poolState.baseMint.toString(), error }, `Failed to buy token`);
     } finally {
-      if (this.config.oneTokenAtATime) {
-        this.mutex.release();
-      }
+      this.endPosition(mint);
     }
   }
 
   public async sell(accountId: PublicKey, rawAccount: RawAccount, tokenProgramId: PublicKey = TOKEN_PROGRAM_ID) {
-    if (this.config.oneTokenAtATime) {
-      this.sellExecutionCount++;
-    }
-
+    let trackedSell = false;
     try {
       logger.trace({ mint: rawAccount.mint }, `Processing new token...`);
       const amount = BigInt(rawAccount.amount.toString());
@@ -295,6 +282,10 @@ export class Bot {
           logger.info({ mint: rawAccount.mint.toString() }, `Empty balance, can't sell`);
         }
         return;
+      }
+      if (this.config.oneTokenAtATime) {
+        this.sellExecutionCount++;
+        trackedSell = true;
       }
 
       const position = this.positions.get(rawAccount.mint.toString());
@@ -386,7 +377,7 @@ export class Bot {
     } catch (error) {
       logger.error({ mint: rawAccount.mint.toString(), error }, `Failed to sell token`);
     } finally {
-      if (this.config.oneTokenAtATime) {
+      if (trackedSell) {
         this.sellExecutionCount--;
       }
     }
@@ -554,88 +545,119 @@ export class Bot {
       logger.debug({ mint }, 'Skipping pump buy because token is not in a snipe list');
       return;
     }
-    if (this.buying.has(mint) || this.positions.get(mint)) {
+    if (this.positions.get(mint)) {
       return;
     }
-    if (this.config.oneTokenAtATime && (this.mutex.isLocked() || this.sellExecutionCount > 0)) {
-      logger.debug({ mint }, 'Skipping pump buy because one token at a time is on');
+    if (this.config.autoBuyDelay > 0) {
+      await sleep(this.config.autoBuyDelay);
+    }
+
+    const screened = await this.pumpTrader.screenCreate(event);
+    if (!screened) {
+      return;
+    }
+    if (!this.beginPosition(mint)) {
       return;
     }
 
-    this.buying.add(mint);
-    if (this.config.oneTokenAtATime) {
-      await this.mutex.acquire();
-    }
-
-    let paper: { tokensOut: bigint } | null = null;
     try {
-      if (this.config.autoBuyDelay > 0) {
-        await sleep(this.config.autoBuyDelay);
+      const result = await this.pumpTrader.commitCreate(screened);
+      if (!result) {
+        return;
       }
-      const result = await this.pumpTrader.buyCreate(event);
-      if (result && this.config.dryRun && this.config.autoSell) {
-        paper = result;
+      logger.info(
+        { mint, tokensOut: result.tokensOut.toString(), spendLamports: this.config.quoteAmount.raw.toString() },
+        this.config.dryRun ? 'DRY_RUN simulated buy' : 'Pump buy submitted',
+      );
+      if (this.config.dryRun && this.config.autoSell) {
+        logger.info(
+          { mint, priceCheckDurationMs: this.config.priceCheckDuration },
+          'DRY_RUN simulated position is open. Watching price until take-profit, stop-loss, or the price-check duration, then simulating the sell.',
+        );
+        const sold = await this.pumpTrader.sellPump(result.position, result.tokensOut);
+        logger.info({ mint, sold }, 'DRY_RUN simulated sell');
       }
     } catch (error) {
       logger.error({ mint, error }, 'Failed to buy pump token');
     } finally {
-      this.buying.delete(mint);
-      if (this.config.oneTokenAtATime) {
-        this.mutex.release();
-      }
-    }
-
-    if (paper) {
-      const position = this.positions.get(mint);
-      if (position?.venue === 'pump') {
-        await this.pumpTrader.sellPump(position, paper.tokensOut);
-      }
+      this.endPosition(mint);
     }
   }
 
   public async buyPumpSwap(event: CreatePoolEvent) {
-    const mint = event.baseMint.toBase58();
-    if (this.config.useSnipeList && !this.snipeListCache?.isInList(mint)) {
-      logger.debug({ mint }, 'Skipping PumpSwap buy because token is not in a snipe list');
+    if (
+      this.config.useSnipeList &&
+      !this.snipeListCache?.isInList(event.baseMint.toBase58()) &&
+      !this.snipeListCache?.isInList(event.quoteMint.toBase58())
+    ) {
+      logger.debug(
+        { baseMint: event.baseMint.toBase58(), quoteMint: event.quoteMint.toBase58() },
+        'Skipping PumpSwap buy because token is not in a snipe list',
+      );
       return;
     }
-    if (this.buying.has(mint) || this.positions.get(mint)) {
+    if (this.config.autoBuyDelay > 0) {
+      await sleep(this.config.autoBuyDelay);
+    }
+
+    const screened = await this.pumpTrader.screenPool(event);
+    if (!screened) {
       return;
     }
-    if (this.config.oneTokenAtATime && (this.mutex.isLocked() || this.sellExecutionCount > 0)) {
-      logger.debug({ mint }, 'Skipping PumpSwap buy because one token at a time is on');
+    const mint = screened.position.mint.toBase58();
+    if (this.positions.get(mint) || !this.beginPosition(mint)) {
       return;
     }
 
-    this.buying.add(mint);
-    if (this.config.oneTokenAtATime) {
-      await this.mutex.acquire();
-    }
-
-    let paper: { tokensOut: bigint } | null = null;
     try {
-      if (this.config.autoBuyDelay > 0) {
-        await sleep(this.config.autoBuyDelay);
+      const result = await this.pumpTrader.commitPool(screened);
+      if (!result) {
+        return;
       }
-      const result = await this.pumpTrader.buyPool(event);
-      if (result && this.config.dryRun && this.config.autoSell) {
-        paper = result;
+      logger.info(
+        {
+          mint,
+          tokensOut: result.tokensOut.toString(),
+          tokenIsBase: result.position.tokenIsBase,
+          spendLamports: this.config.quoteAmount.raw.toString(),
+        },
+        this.config.dryRun ? 'DRY_RUN simulated buy' : 'PumpSwap buy submitted',
+      );
+      if (this.config.dryRun && this.config.autoSell) {
+        logger.info(
+          { mint, priceCheckDurationMs: this.config.priceCheckDuration },
+          'DRY_RUN simulated position is open. Watching price until take-profit, stop-loss, or the price-check duration, then simulating the sell.',
+        );
+        const sold = await this.pumpTrader.sellPumpSwap(result.position, result.tokensOut);
+        logger.info({ mint, sold }, 'DRY_RUN simulated sell');
       }
     } catch (error) {
       logger.error({ mint, error }, 'Failed to buy PumpSwap token');
     } finally {
-      this.buying.delete(mint);
-      if (this.config.oneTokenAtATime) {
-        this.mutex.release();
-      }
+      this.endPosition(mint);
     }
+  }
 
-    if (paper) {
-      const position = this.positions.get(mint);
-      if (position?.venue === 'pumpswap') {
-        await this.pumpTrader.sellPumpSwap(position, paper.tokensOut);
-      }
+  private beginPosition(mint: string): boolean {
+    if (!this.config.oneTokenAtATime) {
+      return true;
     }
+    if (this.openPositionMint !== null || this.sellExecutionCount > 0) {
+      logger.debug(
+        { mint, holding: this.openPositionMint },
+        'Skipping buy because one token at a time is on and a position is already open',
+      );
+      return false;
+    }
+    this.openPositionMint = mint;
+    return true;
+  }
+
+  private endPosition(mint: string) {
+    if (!this.config.oneTokenAtATime || this.openPositionMint !== mint) {
+      return;
+    }
+    this.openPositionMint = null;
   }
 
   private async closeEmptyTokenAccount(account: PublicKey, tokenProgramId: PublicKey) {

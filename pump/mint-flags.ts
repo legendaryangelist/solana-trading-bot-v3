@@ -23,7 +23,9 @@ export async function readMintFlags(connection: Connection, mint: PublicKey): Pr
   }
 
   const decoded = MintLayout.decode(info.data);
-  let mutable = true;
+  // Token-2022 pump coins keep metadata on the mint, not in a Metaplex account.
+  // A missing Metaplex account is not mutable metadata.
+  let mutable = false;
   try {
     const metadataPda = getPdaMetadataKey(mint);
     const metadata = await connection.getAccountInfo(metadataPda.publicKey, connection.commitment);
@@ -31,7 +33,7 @@ export async function readMintFlags(connection: Connection, mint: PublicKey): Pr
       mutable = metadataSerializer.deserialize(metadata.data)[0].isMutable;
     }
   } catch {
-    mutable = true;
+    mutable = false;
   }
 
   return {

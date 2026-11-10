@@ -23,6 +23,8 @@ export interface PumpSwapPosition {
   coinCreator: PublicKey;
   creatorFeeBps: bigint;
   virtualQuoteReserves: bigint;
+  /** False when WSOL is the pool base and the token is the quote. */
+  tokenIsBase: boolean;
 }
 
 export type Position = PumpPosition | PumpSwapPosition;

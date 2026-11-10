@@ -38,7 +38,11 @@ export function evaluatePumpFilters(config: PumpFilterConfig, snapshot: PumpFilt
     return { ok: false, message: 'Pump -> bonding curve is complete' };
   }
   if (config.skipMayhem && snapshot.mayhem) {
-    return { ok: false, message: 'Pump -> mayhem mode' };
+    return {
+      ok: false,
+      message:
+        'Skipping pump buy: mayhem mode is enabled on this coin and PUMP_SKIP_MAYHEM=true. Set PUMP_SKIP_MAYHEM=false to buy mayhem-mode coins.',
+    };
   }
   if (!config.allowNonSolQuote && !isSolQuoteMint(snapshot.quoteMint)) {
     return { ok: false, message: 'Pump -> quote mint is not SOL' };
