@@ -186,7 +186,7 @@ export class PumpTrader {
       return null;
     }
 
-    const recipient = this.pickWallet(global?.buybackFeeRecipients ?? []);
+    const recipient = this.pickRecipient(global?.buybackFeeRecipients ?? []);
     if (!recipient) {
       logger.error({ mint }, 'Pump Global has no buyback fee recipient. Buy was not sent.');
       return null;
@@ -446,7 +446,7 @@ export class PumpTrader {
       higherFee(curveNow?.creatorFeeBps ?? 0n, global?.creatorFeeBasisPoints ?? 0n),
       BONDING_CURVE_CREATOR_FEE_BPS,
     );
-    const recipient = this.pickWallet(global?.buybackFeeRecipients ?? []);
+    const recipient = this.pickRecipient(global?.buybackFeeRecipients ?? []);
     if (!recipient) {
       logger.error({ mint: position.mint.toBase58() }, 'Pump Global has no buyback fee recipient. Sell was not sent.');
       return false;
@@ -722,8 +722,10 @@ export class PumpTrader {
     return this.pumpGlobal;
   }
 
-  private pickWallet(keys: PublicKey[]): PublicKey | null {
-    const usable = keys.filter((key) => PublicKey.isOnCurve(key.toBytes()));
+  private pickRecipient(keys: PublicKey[]): PublicKey | null {
+    // Buyback recipients are program-derived addresses. They are not ed25519
+    // wallet keys, so an on-curve check rejects every entry in Global.
+    const usable = keys.filter((key) => !key.equals(PublicKey.default));
     if (usable.length === 0) {
       return null;
     }
@@ -734,7 +736,7 @@ export class PumpTrader {
     try {
       const info = await this.connection.getAccountInfo(pumpAmmGlobalConfigPda(), this.connection.commitment);
       const global = info ? decodePumpAmmGlobal(info.data as Buffer) : null;
-      const recipients = (global?.buybackFeeRecipients ?? []).filter((key) => PublicKey.isOnCurve(key.toBytes()));
+      const recipients = (global?.buybackFeeRecipients ?? []).filter((key) => !key.equals(PublicKey.default));
       if (recipients.length === 0) {
         return null;
       }

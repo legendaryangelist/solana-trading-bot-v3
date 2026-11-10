@@ -1,7 +1,7 @@
 import assert from 'assert';
 import fs from 'fs';
 import path from 'path';
-import { Keypair, PublicKey } from '@solana/web3.js';
+import { ComputeBudgetProgram, Connection, Keypair, PublicKey, TransactionMessage, VersionedTransaction } from '@solana/web3.js';
 import { NATIVE_MINT, TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import bs58 from 'bs58';
 import { getWallet } from '../helpers/wallet';
@@ -14,9 +14,9 @@ import {
 } from '../pump/constants';
 import { parseCreateEvent, parseCreatePoolEvent, parseTradeEvent } from '../pump/events';
 import { evaluatePumpFilters, PumpFilterConfig } from '../pump/filters';
-import { pumpBuyExactQuoteIx, pumpSwapBuyIx } from '../pump/instructions';
+import { createBaseAtaIx, pumpBuyExactQuoteIx, pumpSwapBuyIx } from '../pump/instructions';
 import { decodeBondingCurve, decodePumpAmmGlobal, decodePumpGlobal, decodePumpSwapPool } from '../pump/layout';
-import { canonicalPumpPoolPda, pumpAmmFeeConfigPda, pumpAmmGlobalConfigPda, pumpGlobalPda } from '../pump/pda';
+import { bondingCurvePda, canonicalPumpPoolPda, pumpAmmFeeConfigPda, pumpAmmGlobalConfigPda, pumpGlobalPda } from '../pump/pda';
 import {
   applySlippage,
   curveProgressPercent,
@@ -394,4 +394,62 @@ testLayouts();
 testEvents();
 testFiltersAndPdas();
 testLiveEvents();
-console.log('audit tests passed');
+
+async function testLiveGlobalAndSimulate() {
+  const connection = new Connection('https://api.mainnet-beta.solana.com', 'confirmed');
+  const info = await connection.getAccountInfo(pumpGlobalPda());
+  assert.ok(info);
+  const global = decodePumpGlobal(info.data);
+  assert.ok(global);
+  assert.strictEqual(global.feeBasisPoints, 95n);
+  assert.strictEqual(global.initialVirtualSolReserves, 30_000_000_000n);
+  assert.strictEqual(global.initialRealTokenReserves, 793_100_000_000_000n);
+  assert.strictEqual(global.buybackFeeRecipients.length, 8);
+  assert.ok(global.buybackFeeRecipients.every((key) => !key.equals(PublicKey.default)));
+  assert.strictEqual(PublicKey.isOnCurve(global.buybackFeeRecipients[0].toBytes()), false);
+  assert.ok(global.buybackFeeRecipients.some((key) => key.toBase58() === '5YxQFdt3Tr9zJLvkFccqXVUwhdTWJQc1fFg2YPbxvxeD'));
+
+  const mint = new PublicKey('Cg8yyDDSjyfuT18iLb7y6TmMg8vhYU1XHPB9XuVxpump');
+  const curveInfo = await connection.getAccountInfo(bondingCurvePda(mint));
+  assert.ok(curveInfo);
+  const curve = decodeBondingCurve(curveInfo.data);
+  assert.ok(curve && curve.complete === false);
+  const mintInfo = await connection.getAccountInfo(mint);
+  assert.ok(mintInfo);
+  // Public trader account used only as a fee payer inside simulateTransaction.
+  // Signature verification is off, so this does not broadcast or spend their SOL.
+  const payer = new PublicKey('8CyZqkTQN2CjqQ2mEbSHWGbH5BHcFhk2bCgeY1S1LN3r');
+  assert.ok((await connection.getBalance(payer)) > 20_000_000);
+  const { blockhash } = await connection.getLatestBlockhash();
+  const message = new TransactionMessage({
+    payerKey: payer,
+    recentBlockhash: blockhash,
+    instructions: [
+      ComputeBudgetProgram.setComputeUnitLimit({ units: 250_000 }),
+      createBaseAtaIx(payer, mint, payer, mintInfo.owner),
+      pumpBuyExactQuoteIx({
+        user: payer,
+        mint,
+        baseTokenProgram: mintInfo.owner,
+        spendableQuoteIn: 10_000_000n,
+        minTokensOut: 1n,
+        buybackFeeRecipient: global.buybackFeeRecipients[0],
+      }),
+    ],
+  }).compileToV0Message();
+  const simulation = await connection.simulateTransaction(new VersionedTransaction(message), {
+    sigVerify: false,
+    replaceRecentBlockhash: true,
+  });
+  assert.strictEqual(simulation.value.err, null);
+  assert.ok((simulation.value.logs || []).some((line) => line.includes('Instruction: BuyExactQuoteInV3')));
+}
+
+testLiveGlobalAndSimulate()
+  .then(() => {
+    console.log('audit tests passed');
+  })
+  .catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
