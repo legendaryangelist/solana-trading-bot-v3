@@ -64,6 +64,7 @@ import {
   PUMP_BUYER_WAIT_MS,
   PUMP_MAX_REAL_SOL,
   PUMP_SKIP_MAYHEM,
+  PUMP_CHECK_IF_MUTABLE,
   PUMP_ALLOW_NON_SOL_QUOTE,
   PUMP_CREATOR_BLACKLIST,
 } from './helpers';
@@ -157,7 +158,7 @@ function printDetails(wallet: Keypair, quoteToken: Token, bot: Bot) {
     logger.info(`Check burned: ${botConfig.checkBurned}`);
     logger.info(`Min pool size: ${botConfig.minPoolSize.toFixed()}`);
     logger.info(`Max pool size: ${botConfig.maxPoolSize.toFixed()}`);
-    logger.info(`Check mutable: ${botConfig.checkMutable}`);
+    logger.info(`Check mutable: ${CHECK_IF_MUTABLE}`);
   }
 
   if (botConfig.enablePumpfun || botConfig.enablePumpswap) {
@@ -169,6 +170,7 @@ function printDetails(wallet: Keypair, quoteToken: Token, bot: Bot) {
     logger.info(`Min unique buyers: ${botConfig.pumpFilters.minUniqueBuyers}`);
     logger.info(`Max SOL already in curve: ${botConfig.pumpFilters.maxRealSol}`);
     logger.info(`Skip mayhem: ${botConfig.pumpFilters.skipMayhem}`);
+    logger.info(`Pump check mutable: ${botConfig.checkMutable}`);
     logger.info(`Allow non-SOL quote: ${botConfig.pumpFilters.allowNonSolQuote}`);
   }
 
@@ -250,7 +252,7 @@ const runListener = async () => {
     retryBackoffMs: RETRY_BACKOFF_MS,
     sellSlippageStep: SELL_SLIPPAGE_STEP,
     priceCheckWebsocket: PRICE_CHECK_WEBSOCKET,
-    checkMutable: CHECK_IF_MUTABLE,
+    checkMutable: PUMP_CHECK_IF_MUTABLE,
     enableRaydium: ENABLE_RAYDIUM,
     enablePumpfun: ENABLE_PUMPFUN,
     enablePumpswap: ENABLE_PUMPSWAP,

@@ -21,7 +21,7 @@ export class DryRunTransactionExecutor implements TransactionExecutor {
       return { confirmed: false, signature: 'dry-run', error: 'serialize failed' };
     }
 
-    logger.info({ bytes }, 'DRY_RUN: transaction was not sent');
+    logger.info({ bytes }, 'DRY_RUN simulated transaction built and not broadcast');
     return { confirmed: true, signature: 'dry-run' };
   }
 }

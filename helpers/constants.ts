@@ -112,5 +112,8 @@ export const PUMP_MIN_UNIQUE_BUYERS = envNum('PUMP_MIN_UNIQUE_BUYERS', 0);
 export const PUMP_BUYER_WAIT_MS = envNum('PUMP_BUYER_WAIT_MS', 0);
 export const PUMP_MAX_REAL_SOL = envNum('PUMP_MAX_REAL_SOL', 0);
 export const PUMP_SKIP_MAYHEM = envBool('PUMP_SKIP_MAYHEM', true);
+// Token-2022 pump coins do not use Metaplex metadata. The Raydium mutable check
+// rejects them, so pump has its own switch and it defaults off.
+export const PUMP_CHECK_IF_MUTABLE = envBool('PUMP_CHECK_IF_MUTABLE', false);
 export const PUMP_ALLOW_NON_SOL_QUOTE = envBool('PUMP_ALLOW_NON_SOL_QUOTE', false);
 export const PUMP_CREATOR_BLACKLIST = envStr('PUMP_CREATOR_BLACKLIST', 'pump-creator-blacklist.txt');

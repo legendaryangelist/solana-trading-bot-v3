@@ -45,7 +45,7 @@ Still present, and intentional:
 ### Bot
 
 - `LOG_LEVEL` — pino level. Example: `info`.
-- `ONE_TOKEN_AT_A_TIME` — process one buy/sell position at a time.
+- `ONE_TOKEN_AT_A_TIME` — only one open position at a time. Filters do not take this slot. It is taken when a buy is sent (or simulated) and released when that attempt finishes, including dry-run, errors, and timeouts. A dry-run pump position stays open through the simulated price watch and simulated sell. The skip log names the mint that is holding the slot.
 - `PRE_LOAD_EXISTING_MARKETS` — load existing OpenBook markets at startup. Do not use this on a public RPC. Raydium only.
 - `CACHE_NEW_MARKETS` — subscribe to new OpenBook markets. Raydium only.
 - `TRANSACTION_EXECUTOR` — `default`, `warp`, or `jito`.
@@ -92,7 +92,7 @@ Raydium pool-size, burn, and socials filters do not run on pump venues. Mint ren
 
 - `FILTER_CHECK_INTERVAL` / `FILTER_CHECK_DURATION` — how often and how long to re-check filters. `0` skips the wait.
 - `CONSECUTIVE_FILTER_MATCHES` — matches required in a row.
-- `CHECK_IF_MUTABLE` — require immutable metadata. Also applied to pump mints.
+- `CHECK_IF_MUTABLE` — require immutable Metaplex metadata. Raydium only.
 - `CHECK_IF_SOCIALS` — require a non-empty metadata extension. Raydium only. Fetches the creator's metadata URL.
 - `CHECK_IF_MINT_IS_RENOUNCED` — require no mint authority. Also applied to pump mints.
 - `CHECK_IF_FREEZABLE` — reject a mint that still has a freeze authority. Also applied to pump mints.
@@ -110,8 +110,9 @@ A numeric `0` disables that bound. `PUMP_MAX_CURVE_PROGRESS=100` allows any inco
 - `PUMP_MIN_UNIQUE_BUYERS` — distinct buy-event users seen since the process started.
 - `PUMP_BUYER_WAIT_MS` — how long to wait for `PUMP_MIN_UNIQUE_BUYERS`.
 - `PUMP_MAX_REAL_SOL` — skip a curve that already holds more quote than this.
-- `PUMP_SKIP_MAYHEM` — skip mayhem-mode coins.
-- `PUMP_ALLOW_NON_SOL_QUOTE` — reserved. Non-SOL quotes are not bought.
+- `PUMP_SKIP_MAYHEM` — skip mayhem-mode coins. The log says these are skipped because this flag is true. Mayhem coins are real creates (the transaction includes `InitializeMayhemState`), not a decode error. Set this to `false` to buy them.
+- `PUMP_CHECK_IF_MUTABLE` — apply the Metaplex mutable-metadata check to pump mints. Default `false`. pump.fun `create_v2` coins are Token-2022 and store metadata on the mint, so `CHECK_IF_MUTABLE=true` does not apply to them. A missing Metaplex account is not treated as mutable.
+- `PUMP_ALLOW_NON_SOL_QUOTE` — reserved. Non-SOL quotes are not bought. A coin whose address ends in `pump` can still be quoted in another token. The skip log includes that quote mint. SOL quotes decode as the all-ones default pubkey or wrapped SOL. This was checked against a live `CreateV2` event.
 - `PUMP_CREATOR_BLACKLIST` — path to a text file of creator addresses. Reloaded when the file changes.
 
 Program ids and instruction accounts come from `pump-fun/pump-public-docs` (`idl/pump.ts`, `idl/pump_amm.ts`, and the v3 / PumpSwap v2 trade docs). Bonding-curve fees in the quoter are 0.95% protocol + 0.30% creator. PumpSwap quotes use the 0–420 SOL tier from the 17 October 2026 fee schedule (0.93% protocol + 0.30% creator + 0.02% LP). A higher creator fee on the account is used when it is set. These quotes were not simulated against mainnet.
@@ -128,6 +129,10 @@ Known risks:
 - Token-2022 accounts with extensions are watched without a fixed data-size filter. A mint whose account cannot be closed will fail the close instruction; the last sell attempts omit it.
 - Warp and Jito still send signed transactions to third parties when selected.
 - This is not a promise of profit. Sniping new tokens is a way to lose the quote amount.
+
+## Harmless startup warning
+
+`bigint: Failed to load bindings, pure JS will be used` comes from the `bigint-buffer` package when its optional native addon is not compiled. The pure JavaScript fallback is what this process uses. It does not change quotes, signatures, or which coins are bought.
 
 ## Scripts
 

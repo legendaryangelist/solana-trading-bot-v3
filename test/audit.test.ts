@@ -9,6 +9,8 @@ import {
   PUMP_AMM_PROGRAM_ID,
   PUMP_FEE_PROGRAM_ID,
   PUMP_PROGRAM_ID,
+  isSolQuoteMint,
+  orientSolPair,
 } from '../pump/constants';
 import { parseCreateEvent, parseCreatePoolEvent, parseTradeEvent } from '../pump/events';
 import { evaluatePumpFilters, PumpFilterConfig } from '../pump/filters';
@@ -336,10 +338,60 @@ function snapshot(creator: PublicKey) {
   };
 }
 
+const LIVE_CREATE_EVENT =
+  'G3KpTd7rY3YDAAAATFVWAwAAAExVVkMAAABodHRwczovL2lwZnMuaW8vaXBmcy9RbVlQMXF6bnZEUE1jN1dHYmVrdUpBNUFnc2dLeHJGRmo1NlNwNG9NOFlKQlhn31UBxxommr1drDf0IIeVcw8/gjzCiEnVcq9ESXP4g79EL6fEEeFycUyKvM8kijhxvkC1izxkoxkQYrmBc+gY75JdJwcRS0UO4uzQqe1e4Xu5azRyi45gREx0L0QQjphukl0nBxFLRQ7i7NCp7V7he7lrNHKLjmBETHQvRBCOmG54AfNqAAAAAAAQ2EfjzwMAAKwj/AYAAAAAeMX7UdECAACAxqR+jQMABt324e51j94YQl285GzN2rYa/E2DuQ0n/r35KNihi/wBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKwj/AYAAAAAAAAAAAAAAAAA';
+const LIVE_POOL_EVENT =
+  'sTEM0qB2p3R9AfNqAAAAAAAA3sz+UE/Wcljd46aCxJkCg/ATYnKJKJJHqd4IPRPVmaeuLGRkUXKK+VsGWE+khLHXlLEY59A01TAJ+d1KzhGDnwabiFf+q4GE+2h/Y0YYwDXaxDncGus7VZig8AAAAAABBgkACAGpLLwAAHyVGwQAAAAAAAgBqSy8AAB8lRsEAAAAAGQAAAAAAAAAczdqzRsAAAAPN2rNGwAAAP/Nebt8RGtCFvCEPZDgG4SDfxDRPQ+mgHF2qSXSEpOrCImQCUKLSuQPDpv7n1c5NGjElbVqrg/jiNFa3Lc/ri3hpGUvmXJsen6DMq22tfbj4qh8iS6ag/9DlMSrfWqCN4e3WBLS/VpiU9aqqfvCL0cYisevMAJOGIZkj74iHuZyLuLB776OOv8UAj4xez+Qr0Gy6ezPAoGQfrRJ0E5K08AKAQAAAAAAAAAAAAA=';
+
+function testLiveEvents() {
+  const created = parseCreateEvent(Buffer.from(LIVE_CREATE_EVENT, 'base64'));
+  assert.ok(created);
+  assert.strictEqual(created.mint.toBase58(), 'G2o6dtfYWv9F1mSD6Wtb1yLCz7vvzx4mNXwhM6Sapump');
+  assert.ok(created.quoteMint.equals(PublicKey.default));
+  assert.strictEqual(isSolQuoteMint(created.quoteMint), true);
+  assert.strictEqual(created.isMayhemMode, true);
+  assert.strictEqual(created.tokenProgram.toBase58(), 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb');
+  assert.strictEqual(created.virtualSolReserves, 30_000_000_000n);
+
+  const pool = parseCreatePoolEvent(Buffer.from(LIVE_POOL_EVENT, 'base64'));
+  assert.ok(pool);
+  assert.strictEqual(pool.baseMint.toBase58(), 'CiuCbzit6WJBxYM58BeoCzZ2xbQMMN8ciWYn1jH6pump');
+  assert.ok(pool.quoteMint.equals(NATIVE_MINT));
+  assert.strictEqual(isSolQuoteMint(pool.quoteMint), true);
+  const flipped = orientSolPair(NATIVE_MINT, pool.baseMint);
+  assert.ok(flipped);
+  assert.strictEqual(flipped.tokenIsBase, false);
+  assert.ok(flipped.tokenMint.equals(pool.baseMint));
+  const normal = orientSolPair(pool.baseMint, pool.quoteMint);
+  assert.ok(normal);
+  assert.strictEqual(normal.tokenIsBase, true);
+  assert.strictEqual(orientSolPair(pool.baseMint, Keypair.generate().publicKey), null);
+
+  const mayhem = evaluatePumpFilters(
+    {
+      minCurveProgress: 0,
+      maxCurveProgress: 100,
+      minMarketCapSol: 0,
+      maxMarketCapSol: 0,
+      minDevBuySol: 0,
+      maxDevBuySol: 0,
+      maxCreatorHoldPercent: 0,
+      minUniqueBuyers: 0,
+      maxRealSol: 0,
+      skipMayhem: true,
+      allowNonSolQuote: false,
+    },
+    { ...snapshot(created.creator), mayhem: true, quoteMint: PublicKey.default },
+  );
+  assert.strictEqual(mayhem.ok, false);
+  assert.ok(mayhem.message && mayhem.message.includes('PUMP_SKIP_MAYHEM=true'));
+}
+
 testSecurityRegression();
 testWallet();
 testQuotes();
 testLayouts();
 testEvents();
 testFiltersAndPdas();
+testLiveEvents();
 console.log('audit tests passed');
