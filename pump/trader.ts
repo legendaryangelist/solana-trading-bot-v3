@@ -12,6 +12,7 @@ import { logger } from '../helpers/logger';
 import { sleep } from '../helpers/promises';
 import { watchAccountUntil } from '../helpers/price-watch';
 import { TransactionExecutor } from '../transactions';
+import { buyFailureShouldStop } from '../transactions/tx-error';
 import {
   BONDING_CURVE_CREATOR_FEE_BPS,
   BONDING_CURVE_PROTOCOL_FEE_BPS,
@@ -216,6 +217,15 @@ export class PumpTrader {
   }): Promise<{ tokensOut: bigint; position: PumpPosition } | null> {
     const { event, tokenProgram, initialReal, protocolFeeBps, creatorFeeBps, expected, recipient } = screened;
     const mint = event.mint.toBase58();
+    const balance = BigInt(await this.connection.getBalance(this.config.wallet.publicKey));
+    const needed = this.config.quoteLamports + 6_000_000n;
+    if (balance < needed) {
+      logger.error(
+        { mint, balance: balance.toString(), needed: needed.toString() },
+        'Not enough SOL for the pump buy plus token-account and volume-account rent. Buy was not sent.',
+      );
+      return null;
+    }
     const position: PumpPosition = {
       venue: 'pump',
       mint: event.mint,
@@ -364,6 +374,15 @@ export class PumpTrader {
   }): Promise<{ tokensOut: bigint; position: PumpSwapPosition } | null> {
     const { position, feeBps, expected, buybackAta } = screened;
     const mint = position.mint.toBase58();
+    const balance = BigInt(await this.connection.getBalance(this.config.wallet.publicKey));
+    const needed = this.config.quoteLamports + 6_000_000n;
+    if (balance < needed) {
+      logger.error(
+        { mint, balance: balance.toString(), needed: needed.toString() },
+        'Not enough SOL for the PumpSwap buy plus account rent. Buy was not sent.',
+      );
+      return null;
+    }
     this.positions.set(position);
     const deficit = await this.wrapDeficit(this.config.quoteLamports);
     const tokenProgram = position.tokenIsBase ? position.baseTokenProgram : position.quoteTokenProgram;
@@ -677,9 +696,19 @@ export class PumpTrader {
           logger.info({ mint, signature: result.signature }, `Confirmed ${direction} tx`);
           return true;
         }
-        logger.info({ mint, signature: result.signature, error: result.error }, `Error confirming ${direction} tx`);
+        logger.error(
+          { mint, signature: result.signature, error: result.error, attempt: attempt + 1, max },
+          `${direction} attempt failed`,
+        );
+        const stop =
+          result.retryable === false ||
+          /insufficient lamports|insufficient funds/i.test(result.error || '') ||
+          (direction === 'buy' && buyFailureShouldStop(result.error));
+        if (stop) {
+          return false;
+        }
       } catch (error) {
-        logger.debug({ mint, error }, `Error confirming ${direction} transaction`);
+        logger.error({ mint, error, attempt: attempt + 1, max }, `${direction} attempt threw`);
       }
     }
     return false;

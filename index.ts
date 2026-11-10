@@ -201,7 +201,7 @@ const runListener = async () => {
   let txExecutor: TransactionExecutor;
 
   if (DRY_RUN) {
-    txExecutor = new DryRunTransactionExecutor();
+    txExecutor = new DryRunTransactionExecutor(connection);
   } else {
     switch (TRANSACTION_EXECUTOR) {
       case 'warp': {

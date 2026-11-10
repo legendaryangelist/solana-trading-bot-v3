@@ -19,6 +19,7 @@ import { MarketCache, PoolCache, SnipeListCache } from './cache';
 import { PoolFilters } from './filters';
 import { TransactionExecutor } from './transactions';
 import { createPoolKeys, logger, NETWORK, sleep } from './helpers';
+import { buyFailureShouldStop } from './transactions/tx-error';
 import { watchAccountUntil } from './helpers/price-watch';
 import BN from 'bn.js';
 import { WarpTransactionExecutor } from './transactions/warp-transaction-executor';
@@ -169,9 +170,9 @@ export class Bot {
 
     if (this.config.enablePumpfun || this.config.enablePumpswap) {
       const balance = BigInt(await this.connection.getBalance(this.config.wallet.publicKey, this.connection.commitment));
-      if (balance < quoteAtoms + 5_000_000n) {
+      if (balance < quoteAtoms + 6_000_000n) {
         logger.error(
-          'Wallet SOL balance is below the buy size plus a fee buffer. pump.fun buys spend native SOL, and PumpSwap wraps SOL in the buy transaction.',
+          `Wallet SOL balance is below the buy size plus about 0.006 SOL for the token account, pump volume account, and fees. Need ${quoteAtoms + 6_000_000n} lamports, have ${balance}.`,
         );
         return false;
       }
@@ -251,16 +252,20 @@ export class Bot {
             break;
           }
 
-          logger.info(
+          logger.error(
             {
               mint: poolState.baseMint.toString(),
               signature: result.signature,
               error: result.error,
+              attempt: i + 1,
             },
-            `Error confirming buy tx`,
+            'Raydium buy attempt failed',
           );
+          if (result.retryable === false || buyFailureShouldStop(result.error)) {
+            break;
+          }
         } catch (error) {
-          logger.debug({ mint: poolState.baseMint.toString(), error }, `Error confirming buy transaction`);
+          logger.error({ mint: poolState.baseMint.toString(), error, attempt: i + 1 }, 'Raydium buy attempt threw');
         }
       }
     } catch (error) {
@@ -362,16 +367,20 @@ export class Bot {
             break;
           }
 
-          logger.info(
+          logger.error(
             {
               mint: rawAccount.mint.toString(),
               signature: result.signature,
               error: result.error,
+              attempt: i + 1,
             },
-            `Error confirming sell tx`,
+            'Sell attempt failed',
           );
+          if (/insufficient lamports|insufficient funds/i.test(result.error || '')) {
+            break;
+          }
         } catch (error) {
-          logger.debug({ mint: rawAccount.mint.toString(), error }, `Error confirming sell transaction`);
+          logger.error({ mint: rawAccount.mint.toString(), error, attempt: i + 1 }, 'Sell attempt threw');
         }
       }
     } catch (error) {

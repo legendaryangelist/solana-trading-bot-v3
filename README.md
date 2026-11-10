@@ -134,6 +134,8 @@ Known risks:
 
 `bigint: Failed to load bindings, pure JS will be used` comes from the `bigint-buffer` package when its optional native addon is not compiled. The pure JavaScript fallback is what this process uses. It does not change quotes, signatures, or which coins are bought.
 
+A failed buy logs `buy attempt failed` with the signature and the simulation or confirmation error. A deterministic program error, including `insufficient lamports`, is not retried. `DRY_RUN=true` simulates the signed transaction and stops on the first successful simulation. Keep about 0.006 SOL free above `QUOTE_AMOUNT` for the token account, the pump volume account, and the priority fee. At 250,000 compute units and a compute price of 200,000 micro-lamports, the priority fee is 0.00005 SOL.
+
 ## Scripts
 
 - `npm run start` — run the bot.
