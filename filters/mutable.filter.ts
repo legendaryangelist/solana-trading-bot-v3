@@ -34,12 +34,12 @@ export class MutableFilter implements Filter {
       }
 
       const deserialize = this.metadataSerializer.deserialize(metadataAccount.data);
-      const mutable = !this.checkMutable || deserialize[0].isMutable;
+      const mutableBlocked = this.checkMutable && deserialize[0].isMutable;
       const hasSocials = !this.checkSocials || (await this.hasSocials(deserialize[0]));
-      const ok = !mutable && hasSocials;
+      const ok = !mutableBlocked && hasSocials;
       const message: string[] = [];
 
-      if (mutable) {
+      if (mutableBlocked) {
         message.push('metadata can be changed');
       }
 
@@ -59,7 +59,11 @@ export class MutableFilter implements Filter {
   }
 
   private async hasSocials(metadata: MetadataAccountData) {
-    const response = await fetch(metadata.uri);
+    if (!metadata.uri || !/^https?:\/\//i.test(metadata.uri)) {
+      return false;
+    }
+
+    const response = await fetch(metadata.uri, { signal: AbortSignal.timeout(3000) });
     const data = await response.json();
     return Object.values(data?.extensions ?? {}).some((value: any) => value !== null && value.length > 0);
   }
