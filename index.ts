@@ -45,10 +45,34 @@ import {
   FILTER_CHECK_INTERVAL,
   FILTER_CHECK_DURATION,
   CONSECUTIVE_FILTER_MATCHES,
+  DRY_RUN,
+  ENABLE_RAYDIUM,
+  ENABLE_PUMPFUN,
+  ENABLE_PUMPSWAP,
+  CLOSE_EMPTY_TOKEN_ACCOUNTS,
+  PRICE_CHECK_WEBSOCKET,
+  RETRY_BACKOFF_MS,
+  SELL_SLIPPAGE_STEP,
+  PUMP_MIN_CURVE_PROGRESS,
+  PUMP_MAX_CURVE_PROGRESS,
+  PUMP_MIN_MARKET_CAP_SOL,
+  PUMP_MAX_MARKET_CAP_SOL,
+  PUMP_MIN_DEV_BUY_SOL,
+  PUMP_MAX_DEV_BUY_SOL,
+  PUMP_MAX_CREATOR_HOLD_PERCENT,
+  PUMP_MIN_UNIQUE_BUYERS,
+  PUMP_BUYER_WAIT_MS,
+  PUMP_MAX_REAL_SOL,
+  PUMP_SKIP_MAYHEM,
+  PUMP_CHECK_IF_MUTABLE,
+  PUMP_ALLOW_NON_SOL_QUOTE,
+  PUMP_CREATOR_BLACKLIST,
 } from './helpers';
 import { version } from './package.json';
 import { WarpTransactionExecutor } from './transactions/warp-transaction-executor';
 import { JitoTransactionExecutor } from './transactions/jito-rpc-transaction-executor';
+import { DryRunTransactionExecutor } from './transactions/dry-run-transaction-executor';
+import { BuyerTracker, CreatorBlacklist } from './pump/tracking';
 
 const connection = new Connection(RPC_ENDPOINT, {
   wsEndpoint: RPC_WEBSOCKET_ENDPOINT,
@@ -91,6 +115,12 @@ function printDetails(wallet: Keypair, quoteToken: Token, bot: Bot) {
   logger.info(`Pre load existing markets: ${PRE_LOAD_EXISTING_MARKETS}`);
   logger.info(`Cache new markets: ${CACHE_NEW_MARKETS}`);
   logger.info(`Log level: ${LOG_LEVEL}`);
+  logger.info(`Dry run: ${botConfig.dryRun}`);
+  logger.info(`Raydium: ${botConfig.enableRaydium}`);
+  logger.info(`pump.fun: ${botConfig.enablePumpfun}`);
+  logger.info(`PumpSwap: ${botConfig.enablePumpswap}`);
+  logger.info(`Close empty token accounts: ${botConfig.closeEmptyTokenAccounts}`);
+  logger.info(`Retry backoff: ${botConfig.retryBackoffMs} ms`);
 
   logger.info('- Buy -');
   logger.info(`Buy amount: ${botConfig.quoteAmount.toFixed()} ${botConfig.quoteToken.name}`);
@@ -104,6 +134,8 @@ function printDetails(wallet: Keypair, quoteToken: Token, bot: Bot) {
   logger.info(`Auto sell delay: ${botConfig.autoSellDelay} ms`);
   logger.info(`Max sell retries: ${botConfig.maxSellRetries}`);
   logger.info(`Sell slippage: ${botConfig.sellSlippage}%`);
+  logger.info(`Sell slippage step: ${botConfig.sellSlippageStep}%`);
+  logger.info(`Websocket price checks: ${botConfig.priceCheckWebsocket}`);
   logger.info(`Price check interval: ${botConfig.priceCheckInterval} ms`);
   logger.info(`Price check duration: ${botConfig.priceCheckDuration} ms`);
   logger.info(`Take profit: ${botConfig.takeProfit}%`);
@@ -126,6 +158,20 @@ function printDetails(wallet: Keypair, quoteToken: Token, bot: Bot) {
     logger.info(`Check burned: ${botConfig.checkBurned}`);
     logger.info(`Min pool size: ${botConfig.minPoolSize.toFixed()}`);
     logger.info(`Max pool size: ${botConfig.maxPoolSize.toFixed()}`);
+    logger.info(`Check mutable: ${CHECK_IF_MUTABLE}`);
+  }
+
+  if (botConfig.enablePumpfun || botConfig.enablePumpswap) {
+    logger.info('- pump.fun -');
+    logger.info(`Curve progress: ${botConfig.pumpFilters.minCurveProgress} to ${botConfig.pumpFilters.maxCurveProgress}`);
+    logger.info(`Market cap SOL: ${botConfig.pumpFilters.minMarketCapSol} to ${botConfig.pumpFilters.maxMarketCapSol}`);
+    logger.info(`Dev buy SOL: ${botConfig.pumpFilters.minDevBuySol} to ${botConfig.pumpFilters.maxDevBuySol}`);
+    logger.info(`Max creator hold %: ${botConfig.pumpFilters.maxCreatorHoldPercent}`);
+    logger.info(`Min unique buyers: ${botConfig.pumpFilters.minUniqueBuyers}`);
+    logger.info(`Max SOL already in curve: ${botConfig.pumpFilters.maxRealSol}`);
+    logger.info(`Skip mayhem: ${botConfig.pumpFilters.skipMayhem}`);
+    logger.info(`Pump check mutable: ${botConfig.checkMutable}`);
+    logger.info(`Allow non-SOL quote: ${botConfig.pumpFilters.allowNonSolQuote}`);
   }
 
   logger.info('------- CONFIGURATION END -------');
@@ -137,26 +183,41 @@ const runListener = async () => {
   logger.level = LOG_LEVEL;
   logger.info('Bot is starting...');
 
+  if (!ENABLE_RAYDIUM && !ENABLE_PUMPFUN && !ENABLE_PUMPSWAP) {
+    logger.error('Enable at least one of ENABLE_RAYDIUM, ENABLE_PUMPFUN, ENABLE_PUMPSWAP');
+    process.exit(1);
+  }
+
+  let wallet: Keypair;
+  try {
+    wallet = getWallet(PRIVATE_KEY.trim());
+  } catch (error) {
+    logger.error(error instanceof Error ? error.message : 'PRIVATE_KEY is invalid');
+    process.exit(1);
+  }
+
   const marketCache = new MarketCache(connection);
   const poolCache = new PoolCache();
   let txExecutor: TransactionExecutor;
 
-  switch (TRANSACTION_EXECUTOR) {
-    case 'warp': {
-      txExecutor = new WarpTransactionExecutor(CUSTOM_FEE);
-      break;
-    }
-    case 'jito': {
-      txExecutor = new JitoTransactionExecutor(CUSTOM_FEE, connection);
-      break;
-    }
-    default: {
-      txExecutor = new DefaultTransactionExecutor(connection);
-      break;
+  if (DRY_RUN) {
+    txExecutor = new DryRunTransactionExecutor();
+  } else {
+    switch (TRANSACTION_EXECUTOR) {
+      case 'warp': {
+        txExecutor = new WarpTransactionExecutor(CUSTOM_FEE);
+        break;
+      }
+      case 'jito': {
+        txExecutor = new JitoTransactionExecutor(CUSTOM_FEE, connection);
+        break;
+      }
+      default: {
+        txExecutor = new DefaultTransactionExecutor(connection);
+        break;
+      }
     }
   }
-
-  const wallet = getWallet(PRIVATE_KEY.trim());
   const quoteToken = getToken(QUOTE_MINT);
   const botConfig = <BotConfig>{
     wallet,
@@ -186,6 +247,31 @@ const runListener = async () => {
     filterCheckInterval: FILTER_CHECK_INTERVAL,
     filterCheckDuration: FILTER_CHECK_DURATION,
     consecutiveMatchCount: CONSECUTIVE_FILTER_MATCHES,
+    dryRun: DRY_RUN,
+    closeEmptyTokenAccounts: CLOSE_EMPTY_TOKEN_ACCOUNTS,
+    retryBackoffMs: RETRY_BACKOFF_MS,
+    sellSlippageStep: SELL_SLIPPAGE_STEP,
+    priceCheckWebsocket: PRICE_CHECK_WEBSOCKET,
+    checkMutable: PUMP_CHECK_IF_MUTABLE,
+    enableRaydium: ENABLE_RAYDIUM,
+    enablePumpfun: ENABLE_PUMPFUN,
+    enablePumpswap: ENABLE_PUMPSWAP,
+    pumpBuyerWaitMs: PUMP_BUYER_WAIT_MS,
+    blacklist: new CreatorBlacklist(PUMP_CREATOR_BLACKLIST),
+    buyers: new BuyerTracker(),
+    pumpFilters: {
+      minCurveProgress: PUMP_MIN_CURVE_PROGRESS,
+      maxCurveProgress: PUMP_MAX_CURVE_PROGRESS,
+      minMarketCapSol: PUMP_MIN_MARKET_CAP_SOL,
+      maxMarketCapSol: PUMP_MAX_MARKET_CAP_SOL,
+      minDevBuySol: PUMP_MIN_DEV_BUY_SOL,
+      maxDevBuySol: PUMP_MAX_DEV_BUY_SOL,
+      maxCreatorHoldPercent: PUMP_MAX_CREATOR_HOLD_PERCENT,
+      minUniqueBuyers: PUMP_MIN_UNIQUE_BUYERS,
+      maxRealSol: PUMP_MAX_REAL_SOL,
+      skipMayhem: PUMP_SKIP_MAYHEM,
+      allowNonSolQuote: PUMP_ALLOW_NON_SOL_QUOTE,
+    },
   };
 
   const bot = new Bot(connection, marketCache, poolCache, txExecutor, botConfig);
@@ -196,22 +282,33 @@ const runListener = async () => {
     process.exit(1);
   }
 
-  if (PRE_LOAD_EXISTING_MARKETS) {
+  if (ENABLE_RAYDIUM && PRE_LOAD_EXISTING_MARKETS) {
     await marketCache.init({ quoteToken });
   }
 
   const runTimestamp = Math.floor(new Date().getTime() / 1000);
-  const listeners = new Listeners(connection);
+  const listeners = new Listeners(connection, botConfig.buyers);
   await listeners.start({
     walletPublicKey: wallet.publicKey,
     quoteToken,
     autoSell: AUTO_SELL,
     cacheNewMarkets: CACHE_NEW_MARKETS,
+    enableRaydium: ENABLE_RAYDIUM,
+    enablePumpfun: ENABLE_PUMPFUN,
+    enablePumpswap: ENABLE_PUMPSWAP,
   });
 
   listeners.on('market', (updatedAccountInfo: KeyedAccountInfo) => {
     const marketState = MARKET_STATE_LAYOUT_V3.decode(updatedAccountInfo.accountInfo.data);
     marketCache.save(updatedAccountInfo.accountId.toString(), marketState);
+  });
+
+  listeners.on('pumpCreate', (event) => {
+    void bot.buyPump(event).catch((error) => logger.error({ error }, 'pump.fun buy failed'));
+  });
+
+  listeners.on('pumpPool', (event) => {
+    void bot.buyPumpSwap(event).catch((error) => logger.error({ error }, 'PumpSwap buy failed'));
   });
 
   listeners.on('pool', async (updatedAccountInfo: KeyedAccountInfo) => {
@@ -226,13 +323,18 @@ const runListener = async () => {
   });
 
   listeners.on('wallet', async (updatedAccountInfo: KeyedAccountInfo) => {
-    const accountData = AccountLayout.decode(updatedAccountInfo.accountInfo.data);
+    const data = updatedAccountInfo.accountInfo.data;
+    if (data.length < AccountLayout.span) {
+      return;
+    }
+
+    const accountData = AccountLayout.decode(data.subarray(0, AccountLayout.span));
 
     if (accountData.mint.equals(quoteToken.mint)) {
       return;
     }
 
-    await bot.sell(updatedAccountInfo.accountId, accountData);
+    await bot.sell(updatedAccountInfo.accountId, accountData, updatedAccountInfo.accountInfo.owner);
   });
 
   printDetails(wallet, quoteToken, bot);

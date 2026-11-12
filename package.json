@@ -5,7 +5,8 @@
   "version": "3.0.0",
   "scripts": {
     "start": "ts-node index.ts",
-    "tsc": "tsc --noEmit"
+    "tsc": "tsc --noEmit",
+    "test": "ts-node --transpile-only test/audit.test.ts"
   },
   "dependencies": {
     "@metaplex-foundation/mpl-token-metadata": "^3.2.1",
@@ -18,12 +19,8 @@
     "bip39": "^3.1.0",
     "bn.js": "^5.2.1",
     "bs58": "^5.0.0",
-    "cli-progress": "^3.12.0",
     "dotenv": "^16.4.1",
     "ed25519-hd-key": "^1.3.0",
-    "enquirer": "^2.4.1",
-    "i": "^0.3.7",
-    "npm": "^10.5.2",
     "pino": "^8.18.0",
     "pino-pretty": "^10.3.1",
     "pino-std-serializers": "^6.2.2"
